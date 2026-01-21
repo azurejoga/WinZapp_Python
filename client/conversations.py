@@ -1,6 +1,7 @@
 import os
 import sys
 import wx
+from wx.adv import CommandLinkButton as CmdBtn
 import json
 import requests
 from traceback import format_exc
@@ -20,6 +21,14 @@ class ConversationsPanel(wx.Panel):
         self.conversations_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_conversation_selected)
         self.conversation_panel = wx.Panel(self)
         self.conversation_panel.Hide() #hidden by default
+        self.message_label = wx.StaticText(self.conversation_panel, label=self.main_window.i18n.t("type_message"))
+        self.message_field = wx.TextCtrl(self.conversation_panel, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP, size=(300, 25))
+        self.record_voice_message_btn = CmdBtn(self.conversation_panel, mainLabel=self.main_window.i18n.t("record_voice_message"), note="Ctrl+R", size=(150, 40))
 
     def on_conversation_selected(self, event):
+        self.conversation = self.main_window.chats[event.GetIndex()]
+        self.conversation_name = self.main_window.chat_names[event.GetIndex()]
+        #Set conversation name on label
+        self.message_label.SetLabel(f"{self.main_window.i18n.t('type_message')} {self.conversation_name}")
         self.conversation_panel.Show()
+        self.message_field.SetFocus()

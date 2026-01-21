@@ -43,7 +43,7 @@ class MainWindow(wx.Frame):
         self    .SetSize((400, 300))
         self.main_panel = wx.Panel(self)
         self.content_panel = wx.Panel(self.main_panel)
-        self.content_panel.conversations_panel = ConversationsPanel(self, self.content_panel)
+        self.conversations_panel = ConversationsPanel(self, self.content_panel)
         self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.create_accelerator_table()
 
@@ -61,8 +61,8 @@ class MainWindow(wx.Frame):
         panels = self.content_panel.GetChildren()
         for panel in panels:
             panel.Hide()
-        self.content_panel.conversations_panel.Show()
-        self.content_panel.conversations_panel.conversations_list.SetFocus()
+        self.conversations_panel.Show()
+        self.conversations_panel.conversations_list.SetFocus()
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
@@ -153,8 +153,6 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, headers=headers, verify=False)
             response_data = response.json()
-            for contact in response_data:
-                print(contact)
             return response_data
         except Exception as e:
             self.error_sound.play()
@@ -166,9 +164,9 @@ class MainWindow(wx.Frame):
             self.chat_names.append(chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
             self.sync_messages(chat)
         self.add_chats_to_ui()
-        self.content_panel.conversations_panel.conversations_list.Focus(0)
-        self.content_panel.conversations_panel.conversations_list.Select(0)
-        self.content_panel.conversations_panel.conversations_list.SetFocus()
+        self.conversations_panel.conversations_list.Focus(0)
+        self.conversations_panel.conversations_list.Select(0)
+        self.conversations_panel.conversations_list.SetFocus()
 
     def sync_messages(self, chat):
         url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
@@ -180,7 +178,6 @@ class MainWindow(wx.Frame):
         }
 
         response = requests.post(url, json=payload, headers=headers, verify=False)
-        print(response.text)
 
     def add_chats_to_ui(self):
         for index, chat in enumerate(self.chats):
@@ -188,7 +185,7 @@ class MainWindow(wx.Frame):
             {self.chat_names[index]} \
             {f"{chat.get('unreadCount') or 0} {self.i18n.t('unread_messages') if chat.get('unreadCount') or 0 > 1 else self.i18n.t('unread_message')} " if chat.get('unreadCount') or 0 > 0 else ""}\
             "
-            self.content_panel.conversations_panel.conversations_list.Append((string,))
+            self.conversations_panel.conversations_list.Append((string,))
 
     def generate_secret_key(self):
         key_file = os.path.join(os.getcwd(), "data", "secret.key")
