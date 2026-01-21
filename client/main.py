@@ -166,9 +166,9 @@ class MainWindow(wx.Frame):
             self.chat_names.append(chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
             self.sync_messages(chat)
         self.add_chats_to_ui()
-        self.conversations_panel.conversations_list.Focus(0)
-        self.conversations_panel.conversations_list.Select(0)
-        self.conversations_panel.conversations_list.SetFocus()
+        self.content_panel.conversations_panel.conversations_list.Focus(0)
+        self.content_panel.conversations_panel.conversations_list.Select(0)
+        self.content_panel.conversations_panel.conversations_list.SetFocus()
 
     def sync_messages(self, chat):
         url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
@@ -188,7 +188,7 @@ class MainWindow(wx.Frame):
             {self.chat_names[index]} \
             {f"{chat.get('unreadCount') or 0} {self.i18n.t('unread_messages') if chat.get('unreadCount') or 0 > 1 else self.i18n.t('unread_message')} " if chat.get('unreadCount') or 0 > 0 else ""}\
             "
-            self.conversations_panel.conversations_list.Append((string,))
+            self.content_panel.conversations_panel.conversations_list.Append((string,))
 
     def generate_secret_key(self):
         key_file = os.path.join(os.getcwd(), "data", "secret.key")
