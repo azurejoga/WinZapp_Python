@@ -18,6 +18,7 @@
     "unread_message": "mensagem não lida",
     "unread_messages": "mensagens não lidas",
     "type_message": "&Digite uma mensagem para",
+    "type_message_group": "&Digite uma mensagem para o grupo",
     "record_voice_message": "Gravar mensagem de voz",
     "error": "Erro do WinZapp",
     "token_save_failed": "Falha ao salvar o token do usuário.",
