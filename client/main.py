@@ -23,7 +23,7 @@ class MainWindow(wx.Frame):
         self.speak_output = outputs.auto.Auto()
 
         #Initialize sound system
-        self.sound_system = SoundSystem(sound_dir=os.path.join(os.getcwd(), "sounds"))
+        self.sound_system = SoundSystem(self, sound_dir=os.path.join(os.getcwd(), "sounds"))
         self.sound_system.start()
         self.load_sounds()
 

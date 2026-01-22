@@ -5,8 +5,9 @@ import sound_lib, sound_lib.output
 from sound_lib import stream
 
 class SoundSystem:
-    def __init__(self, sound_dir):
+    def __init__(self, main_window, sound_dir):
         self.enabled = False
+        self.main_window = main_window
         self.sound_dir = sound_dir
     
     def start(self):
@@ -26,5 +27,5 @@ class Sound(stream.FileStream):
     def play(self):
         super().stop()
         #Check if sounds are enabled
-        if self.main_window.settings.get("general", {}).get("sounds_enabled", False):
+        if self.sound_system.main_window.settings.get("general", {}).get("sounds_enabled", False):
             super().play()
