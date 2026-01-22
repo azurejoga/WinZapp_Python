@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import requests
 import socketio
 from accessible_output2 import outputs
@@ -89,6 +90,7 @@ class MainWindow(wx.Frame):
         self.pairing_code_updated_sound = Sound(self.sound_system, "pairing_code_updated.ogg")
         self.connected_sound = Sound(self.sound_system, "connected.ogg")
         self.synchronizing_sound = Sound(self.sound_system, "synchronizing.ogg")
+        self.sync_complete_sound = Sound(self.sound_system, "sync_complete.ogg")
 
     def retrieve_token(self):
         try:
@@ -99,7 +101,7 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
             sys.exit()
 
-    def start_sync(self):
+    def prepare_sync(self):
         self.create_basic_files()
         self.generate_secret_key()
         self.key = self.retrieve_secret_key()
@@ -110,9 +112,15 @@ class MainWindow(wx.Frame):
         self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 8080)
         self.connected_sound.play()
         self.synchronizing_sound.play()
+        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+        self.sync_thread.start()
+
+    def start_sync(self):
         self.chats = self.get_chats()
-        self.set_chats()
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
+        self.set_chats()
+        self.sync_complete_sound.play()
+        self.output(self.i18n.t("sync_complete"))
 
     def show_window(self):
         self.Show()
@@ -162,13 +170,13 @@ class MainWindow(wx.Frame):
         self.chat_names = []
         for chat in self.chats:
             self.chat_names.append(chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
-            self.sync_messages(chat)
+            self.sync_chat_messages(chat)
         self.add_chats_to_ui()
         self.conversations_panel.conversations_list.Focus(0)
         self.conversations_panel.conversations_list.Select(0)
         self.conversations_panel.conversations_list.SetFocus()
 
-    def sync_messages(self, chat):
+    def sync_chat_messages(self, chat):
         url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
 
         payload = { "where": { "key": { "remoteJid": chat.get("remoteJid", "")} } }
@@ -202,7 +210,7 @@ if __name__ == "__main__":
     frame = MainWindow(title="WinZapp")
     if frame.connect.check_connection_status():
         frame.retrieve_token()
-        frame.start_sync()
+        frame.prepare_sync()
         frame.show_window()
     else:
         frame.connect.show_connection_dial()

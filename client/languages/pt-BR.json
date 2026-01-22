@@ -25,5 +25,6 @@
     "instance_state_changed": "Ocorreu um evento inesperado. O status da instância mudou ou parece estar desconectado. Por favor, tente realizar o pareamento novamente.",
     "settings_load_failed": "Falha ao carregar o arquivo de configuração:",
     "settings_save_failed": "Ocorreu um erro ao salvar as configurações:",
-    "synchronization_started": "Sincronizando conversas..."
+    "synchronization_started": "Sincronizando conversas...",
+    "sync_complete": "Conversas sincronizadas."
 }

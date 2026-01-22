@@ -9,7 +9,7 @@ class I18n:
 
     def get_language(self):
         #Gets the current language setting from main window settings
-        self.language = self.main_window.settings.get("language", "pt-BR")
+        self.language = self.main_window.settings.get("general", {}).get("language", "pt-BR")
         return self.language
 
     def t(self, key):

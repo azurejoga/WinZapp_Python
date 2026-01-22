@@ -1,5 +1,8 @@
 {
-    "language": "pt-BR",
+    "general": {
+        "language": "pt-BR",
+        "sounds_enabled": true
+    },
     "connection": {
         "authentication_server": "127.0.0.1",
         "authentication_port": 8081,

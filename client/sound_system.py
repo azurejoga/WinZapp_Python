@@ -25,4 +25,6 @@ class Sound(stream.FileStream):
 
     def play(self):
         super().stop()
-        super().play()
+        #Check if sounds are enabled
+        if self.main_window.settings.get("general", {}).get("sounds_enabled", False):
+            super().play()
