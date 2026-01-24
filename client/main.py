@@ -7,7 +7,7 @@ from accessible_output2 import outputs
 from websocket_client import WebSocketClient
 from sound_system import SoundSystem, Sound
 from i18n import I18n
-from utils import encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number
+from utils import encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
 import wx
 from connect import Connect
 from navigation import NavigationPanel
@@ -26,27 +26,47 @@ class MainWindow(wx.Frame):
         self.sound_system = SoundSystem(self, sound_dir=os.path.join(os.getcwd(), "sounds"))
         self.sound_system.start()
         self.load_sounds()
-
         self.settings = {}
+        self.load_settings()
+
+        #Get connection settings
+        self.authentication_server = self.settings.get("connection", {}).get("authentication_server", "127.0.0.1")
+        self.authentication_port = self.settings.get("connection", {}).get("authentication_port", 8081)
+        self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "127.0.0.1")
+        self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 8080)
 
         #Initialize helper classes
         self.connect = Connect(self)
-        #Load client settings
-        self.load_settings()
         #Initialize i18n
         self.i18n = I18n(self)
         self.i18n.get_language()
+        #Check Internet Connection
+        self.offline_mode = not check_internet_connection()
         #Play startup sound
         self.startup_sound.play()
+        self.ws = WebSocketClient(self, self.connect)
+
+        #Check for what window should be shown
+        if not self.connect.check_connection_status():
+            self.connect.show_connection_dial()
+        self.retrieve_token()
+        self.prepare_sync()
+        #Connect WebSocket if not Offline
+        if not self.offline_mode:
+            self.connect.connect_websocket(self.token)
         self.init_UI()
 
     def init_UI(self):
+        if self.offline_mode:
+            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('offline_mode')}")
         self    .SetSize((400, 300))
         self.main_panel = wx.Panel(self)
         self.content_panel = wx.Panel(self.main_panel)
         self.conversations_panel = ConversationsPanel(self, self.content_panel)
         self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.create_accelerator_table()
+        self.Show()
+        app.MainLoop()
 
     def create_accelerator_table(self):
         #Set IDs
@@ -91,6 +111,7 @@ class MainWindow(wx.Frame):
         self.connected_sound = Sound(self.sound_system, "connected.ogg")
         self.synchronizing_sound = Sound(self.sound_system, "synchronizing.ogg")
         self.sync_complete_sound = Sound(self.sound_system, "sync_complete.ogg")
+        self.offline_mode_sound = Sound(self.sound_system, "offline_mode.ogg")
 
     def retrieve_token(self):
         try:
@@ -102,29 +123,27 @@ class MainWindow(wx.Frame):
             sys.exit()
 
     def prepare_sync(self):
-        self.create_basic_files()
         self.generate_secret_key()
         self.key = self.retrieve_secret_key()
-        #Get connection settings
-        self.authentication_server = self.settings.get("connection", {}).get("authentication_server", "127.0.0.1")
-        self.authentication_port = self.settings.get("connection", {}).get("authentication_port", 8081)
-        self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "127.0.0.1")
-        self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 8080)
-        self.connected_sound.play()
-        self.synchronizing_sound.play()
-        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-        self.sync_thread.start()
+        self.create_basic_files()
+
+        #Get Local Chats
+        self.chats = self.get_chats()
+        if not self.offline_mode:
+            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+            self.sync_thread.start()
+        else:
+            self.offline_mode_sound.play()
+            self.output(self.i18n.t("offline_mode"))
 
     def start_sync(self):
-        self.chats = self.get_chats()
+        self.connected_sound.play()
+        self.chats = self.get_remote_chats()
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
-        self.set_chats()
+        self.synchronizing_sound.play()
+        self.sync_remote_chats()
         self.sync_complete_sound.play()
         self.output(self.i18n.t("sync_complete"))
-
-    def show_window(self):
-        self.Show()
-        app.MainLoop()
 
     def create_basic_files(self):
         data_dir = os.path.join(os.getcwd(), "data")
@@ -134,10 +153,25 @@ class MainWindow(wx.Frame):
         #Create empty messages.dat if not exists
         messages_file = os.path.join(data_dir, "messages.dat")
         if not os.path.isfile(messages_file):
-            with open(messages_file, "w") as f:
-                json.dump({}, f)
+            with open(messages_file, "wb") as f:
+                f.write(encrypt_json({"chats": {}}, self.key))
 
     def get_chats(self):
+        messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
+        try:
+            with open(messages_file, "r") as f:
+                encrypted_data = f.read()
+                if encrypted_data:
+                    decrypted_data = decrypt_json(encrypted_data, self.key)
+                    return decrypted_data.get("chats", {})
+                else:
+                    return []
+        except Exception as e:
+            self.error_sound.play()
+            wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
+            return []
+
+    def get_remote_chats(self):
         url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findChats/{self.token}"
         headers = {
             "apikey": self.token,
@@ -146,11 +180,23 @@ class MainWindow(wx.Frame):
         try:
             response = requests.post(url, headers=headers, verify=False)
             response_data = response.json()
+            chats = {}
+            for chat in response_data:
+                chat["messages"] = {}
+                chats[chat.get("remoteJid", "")] = chat
+            self.save_chats(chats)
             self.chat_ids = [chat.get("remoteJid", "") for chat in response_data]
-            return response_data
+            return chats
         except Exception as e:
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('chat_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
+
+    def save_chats(self, chats):
+        #Save back to file
+        messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
+        encrypted_data = encrypt_json({"chats": chats}, self.key)
+        with open(messages_file, "wb") as f:
+            f.write(encrypted_data)
 
     def get_contacts(self):
         url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findContacts/{self.token}"
@@ -168,13 +214,20 @@ class MainWindow(wx.Frame):
 
     def set_chats(self):
         self.chat_names = []
-        for chat in self.chats:
+        for chat in self.chats.values():
             self.chat_names.append(chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
-            self.sync_chat_messages(chat)
         self.add_chats_to_ui()
         self.conversations_panel.conversations_list.Focus(0)
         self.conversations_panel.conversations_list.Select(0)
         self.conversations_panel.conversations_list.SetFocus()
+
+
+    def sync_remote_chats(self):
+        for chat in self.chats.values():
+            self.sync_chat_messages(chat)
+            #Checks if the main window is still open
+            if self.IsShown():
+                wx.CallAfter(self.set_chats)
 
     def sync_chat_messages(self, chat):
         url = f"https://{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
@@ -186,8 +239,13 @@ class MainWindow(wx.Frame):
         }
 
         response = requests.post(url, json=payload, headers=headers, verify=False)
+        response_data = response.json()
+        chat["messages"] = response_data
+        self.chats[chat.get("remoteJid", "")] = chat
+        self.save_chats(self.chats)
 
     def add_chats_to_ui(self):
+        self.conversations_panel.conversations_list.DeleteAllItems()
         for index, chat in enumerate(self.chats):
             string = f"\
             {self.chat_names[index]} \
@@ -199,7 +257,7 @@ class MainWindow(wx.Frame):
         key_file = os.path.join(os.getcwd(), "data", "secret.key")
         if not os.path.isfile(key_file):
             generate_and_save_key(key_file)
-    
+
     def retrieve_secret_key(self):
         key_file = os.path.join(os.getcwd(), "data", "secret.key")
         return retrieve_key(key_file)
@@ -208,9 +266,3 @@ class MainWindow(wx.Frame):
 if __name__ == "__main__":
     app = wx.App()
     frame = MainWindow(title="WinZapp")
-    if frame.connect.check_connection_status():
-        frame.retrieve_token()
-        frame.prepare_sync()
-        frame.show_window()
-    else:
-        frame.connect.show_connection_dial()

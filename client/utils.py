@@ -1,5 +1,6 @@
 import os
 import json
+import requests
 from cryptography.fernet import Fernet
 
 def generate_and_save_key(filepath):
@@ -41,3 +42,10 @@ def format_number(string_number):
         part2 = remaining[4:]
 
     return f'+{ddi} {ddd} {part1}-{part2}'
+
+def check_internet_connection(test_url="https://www.google.com", timeout=10):
+    try:
+        response = requests.get(test_url, timeout=timeout)
+        return True
+    except (requests.ConnectionError, requests.Timeout):
+        return False

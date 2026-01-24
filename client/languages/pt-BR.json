@@ -1,4 +1,5 @@
 {
+    "app_name": "WinZapp",
     "connect_winzapp": "Conectar ao WinZapp",
     "enter_phone": "&Digite seu número de telefone + código do país (apenas números)",
     "continue": "&Continuar",
@@ -13,7 +14,8 @@
     "token_retrieval_failed": "Falha ao recuperar o token do usuário.",
     "main_nav": "&Navegação principal",
     "conversations": "Conversas",
-    "chat_retrieval_failed": "Falha ao obter a lista de conversas.",
+    "chat_retrieval_failed": "Falha ao obter a lista de conversas do servidor.",
+    "chat_load_failed": "Não foi possível carregar o seu arquivo local de mensagens. Reinicie o programa e tente novamente.",
     "contact_retrieval_failed": "Falha ao obter a lista de contatos.",
     "unread_message": "mensagem não lida",
     "unread_messages": "mensagens não lidas",
@@ -26,5 +28,7 @@
     "settings_load_failed": "Falha ao carregar o arquivo de configuração:",
     "settings_save_failed": "Ocorreu um erro ao salvar as configurações:",
     "synchronization_started": "Sincronizando conversas...",
-    "sync_complete": "Conversas sincronizadas."
+    "sync_complete": "Conversas sincronizadas.",
+    "offline_mode_enabled": "Modo offline ativado. Algumas funcionalidades podem estar indisponíveis.",
+    "offline_mode": "Modo Offline"
 }

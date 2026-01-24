@@ -7,10 +7,10 @@ from i18n import I18n
 from traceback import format_exc
 
 class WebSocketClient:
-    def __init__(self, main_window, connect, instance_name):
+    def __init__(self, main_window, connect):
         self.main_window = main_window
         self.connect = connect
-        self.instance_name = instance_name
+        self.instance_name = ""
         #Initialize i18n
         self.i18n = I18n(self.main_window)
         self.i18n.get_language()
@@ -52,8 +52,6 @@ class WebSocketClient:
 
         self.connect.pairing_dial.Destroy()
         self.connect.connection_dial.Destroy()
-        self.main_window.prepare_sync()
-        self.main_window.show_window()
 
     def save_token(self, token):
         with open(os.path.join(os.getcwd(), "data", "token.tk"), "w") as token_file:

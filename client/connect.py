@@ -4,7 +4,6 @@ import threading
 import socketio
 import wx
 import requests
-from websocket_client import WebSocketClient
 from i18n import I18n
 from traceback import format_exc
 import json
@@ -34,41 +33,36 @@ class Connect:
         self.connection_dial.ShowModal()
 
     def on_continue(self, event):
-        #Get connection settings
-        self.authentication_server = self.main_window.settings.get("connection", {}).get("authentication_server", "127.0.0.1")
-        self.authentication_port = self.main_window.settings.get("connection", {}).get("authentication_port", 8081)
-        self.evolution_server = self.main_window.settings.get("connection", {}).get("evolution_server", "127.0.0.1")
-        self.evolution_port = self.main_window.settings.get("connection", {}).get("evolution_port", "8080")
 
         #Tries to create the instance
         try:
-            url = f"https://{self.authentication_server}:{self.authentication_port}/create_instance/"
+            url = f"https://{self.main_window.authentication_server}:{self.main_window.authentication_port}/create_instance/"
             self.phone_number = self.phone_field.GetValue()
             #Check if the user has already tried to connect with this number
             if self.main_window.settings.get("privateinfo", {}).get("WA_phone_number", "") == self.phone_number:
                 #Assume token available
-                self.token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
+                self.main_window.token = self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
             else:
-                self.token = self.generate_random_token()
+                self.main_window.token = self.generate_random_token()
                 #Set the new token and phone number in settings
                 if "privateinfo" not in self.main_window.settings:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
-                self.main_window.settings["privateinfo"]["WA_token"] = self.token
+                self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
                 #Create new instance
                 data = {
-                    "name": self.token,
+                    "name": self.main_window.token,
                     "number": self.phone_number,
-                    "token": self.token
+                    "token": self.main_window.token
                 }
                 response = requests.post(url, json=data, verify=False)
                 response_data = response.json()
 
             #Connect instance
-            url = f"https://{self.evolution_server}:{self.evolution_port}/instance/connect/{self.token}/"
+            url = f"https://{self.main_window.evolution_server}:{self.main_window.evolution_port}/instance/connect/{self.main_window.token}/"
             querystring = {"number": self.phone_number}
             headers = {
-                "apikey": self.token,
+                "apikey": self.main_window.token,
                 "Content-Type": "application/json"
             }
 
@@ -76,6 +70,8 @@ class Connect:
             response_data = response.json()
             print(response_data)
 
+            #Connect WebSocket
+            self.connect_websocket(self.main_window.token)
             self.show_pairing_dial(response_data.get("pairingCode"))
 
         except Exception as e:
@@ -93,15 +89,13 @@ class Connect:
         self.cancel_btn = wx.Button(self.pairing_dial, label=self.i18n.t("cancel_pairing"))
         self.cancel_btn.Bind(wx.EVT_BUTTON, self.on_cancel_pairing)
 
-        self.main_window.ws = WebSocketClient(self.main_window, self, self.token)
-
-        self.connect_websocket()
 
         self.main_window.waiting_pairing_sound.play()
         self.pairing_dial.ShowModal()
 
-    def connect_websocket(self):
-        self.main_window.ws.sio.connect(f"wss://{self.evolution_server}:{self.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.token}, namespaces=[f"/{self.token}"])
+    def connect_websocket(self, instance_name):
+        self.instance_name = instance_name
+        self.main_window.ws.sio.connect(f"wss://{self.main_window.evolution_server}:{self.main_window.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.main_window.token}, namespaces=[f"/{self.main_window.token}"])
 
     def on_cancel_pairing(self, event):
         self.pairing_dial.Destroy()
