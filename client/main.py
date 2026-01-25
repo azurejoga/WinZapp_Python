@@ -139,8 +139,8 @@ class MainWindow(wx.Frame):
     def start_sync(self):
         self.connected_sound.play()
         self.chats = self.get_remote_chats()
-        self.output(self.i18n.t("synchronization_started"), interrupt=True)
         self.synchronizing_sound.play()
+        self.output(self.i18n.t("synchronization_started"), interrupt=True)
         self.sync_remote_chats()
         self.sync_complete_sound.play()
         self.output(self.i18n.t("sync_complete"))
@@ -159,7 +159,7 @@ class MainWindow(wx.Frame):
     def get_chats(self):
         messages_file = os.path.join(os.getcwd(), "data", "messages.dat")
         try:
-            with open(messages_file, "r") as f:
+            with open(messages_file, "rb") as f:
                 encrypted_data = f.read()
                 if encrypted_data:
                     decrypted_data = decrypt_json(encrypted_data, self.key)
@@ -246,7 +246,7 @@ class MainWindow(wx.Frame):
 
     def add_chats_to_ui(self):
         self.conversations_panel.conversations_list.DeleteAllItems()
-        for index, chat in enumerate(self.chats):
+        for index, chat in enumerate(self.chats.values()):
             string = f"\
             {self.chat_names[index]} \
             {f"{chat.get('unreadCount') or 0} {self.i18n.t('unread_messages') if chat.get('unreadCount') or 0 > 1 else self.i18n.t('unread_message')} " if chat.get('unreadCount') or 0 > 0 else ""}\
