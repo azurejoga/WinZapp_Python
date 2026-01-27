@@ -1,7 +1,7 @@
 import os
 import sys
 import wx
-from wx.adv import CommandLinkButton as CmdBtn
+from accessible import AccessibleSearchConversations, AccessibleRecordVoiceMessage
 import json
 import requests
 from traceback import format_exc
@@ -14,10 +14,18 @@ class ConversationsPanel(wx.Panel):
         super().__init__(parent)
         self.main_window = main_window
         self.parent = parent
+        self.chats_list = []
+        self.chat_names = []
+        self.conversation = None
         self.init_UI()
         self.create_accelerator_table()
+        self.create_accel_conversation()
 
     def init_UI(self):
+        self.search_label = wx.StaticText(self, label=self.main_window.i18n.t("search_conversations"), pos=(10, 250))
+        self.search_field = wx.TextCtrl(self, size=(300, 25), pos=(10, 275), style=wx.TE_DONTWRAP)
+        self.search_field.Bind(wx.EVT_TEXT, self.on_search_query_changed)
+        self.search_field.SetAccessible(AccessibleSearchConversations("Ctrl+F"))
         self.conversations_label = wx.StaticText(self, label=self.main_window.i18n.t("conversations"), pos=(10,10))
         self.conversations_list = wx.ListCtrl(self, size=(380, 200), pos=(10, 40), style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.conversations_list.InsertColumn(0, self.main_window.i18n.t("conversations"), width=200)
@@ -31,19 +39,18 @@ class ConversationsPanel(wx.Panel):
 
         self.message_label = wx.StaticText(self.conversation_panel, label=self.main_window.i18n.t("type_message"), pos=(10,200))
         self.message_field = wx.TextCtrl(self.conversation_panel, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP, size=(300, 60), pos=(10, 225))
-        self.record_voice_message_btn = CmdBtn(self.conversation_panel, mainLabel=self.main_window.i18n.t("record_voice_message"), note="Ctrl+R", size=(150, 40), pos=(320, 225))
+        self.record_voice_message_btn = wx.Button(self.conversation_panel, label=self.main_window.i18n.t("record_voice_message"), size=(150, 40), pos=(320, 225))
+        self.record_voice_message_btn.SetAccessible(AccessibleRecordVoiceMessage("Ctrl+R"))
         self.record_voice_message_btn.Bind(wx.EVT_BUTTON, self.on_record_voice_message)
 
     def on_conversation_selected(self, event):
-        # map the selected index to the chats order used when building the UI
-        chats_list = list(self.main_window.chats.values())
         index = event.GetIndex()
         try:
-            self.conversation = chats_list[index]
+            self.conversation = self.chats_list[index]
+            self.conversation_name = self.chat_names[index]
             # self.main_window.output(str(self.conversation.get("messages", [])))
         except Exception:
             return
-        self.conversation_name = self.main_window.chat_names[index]
         self.message_label.SetLabel(f"{self.main_window.i18n.t('type_message')} {self.conversation_name}")
         self.conversation_panel.Show()
         self.message_field.SetFocus()
@@ -52,16 +59,45 @@ class ConversationsPanel(wx.Panel):
 
     def create_accelerator_table(self):
         #Set IDs
+        self.ID_CTRL_F = wx.NewIdRef()
+        #create accelerator table
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, ord('F'), self.ID_CTRL_F)
+        ])
+        self.SetAcceleratorTable(accel_tbl)
+        self.Bind(wx.EVT_MENU, self.on_ctrl_f, id=self.ID_CTRL_F)
+
+    def create_accel_conversation(self):
+        #Set IDs
         self.ID_CTRL_R = wx.NewIdRef()
         self.ID_ESC = wx.NewIdRef()
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL, ord('R'), self.ID_CTRL_R),
-            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESC),
+            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESC)
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message, id=self.ID_CTRL_R)
         self.Bind(wx.EVT_MENU, self.close_conversation, id=self.ID_ESC)
+
+
+    def on_search_query_changed(self, event):
+        #Save copy of chats and chat_names
+        self.chats_list = list(self.main_window.chats.values())
+        self.chat_names = list(self.main_window.chat_names)
+        query = self.search_field.GetValue().lower()
+        self.chats_list.clear()
+        self.chat_names.clear()
+        self.conversations_list.DeleteAllItems()
+        for i, chat in enumerate(self.main_window.chats.values()):
+            name = self.main_window.chat_names[i]
+            if query in name.lower():
+                self.conversations_list.Append((name,))
+                self.chats_list.append(chat)
+                self.chat_names.append(name)
+
+    def on_ctrl_f(self, event):
+        self.search_field.SetFocus()
 
     def on_record_voice_message(self, event):
         pass
@@ -156,7 +192,7 @@ class ConversationsPanel(wx.Panel):
                 remote_jid = msg.get('key', {}).get('remoteJid', '')
                 contact = self.main_window.contacts.get(remote_jid)
                 if contact and contact.get("type", "") == 'contact':
-                    sender_label = contact.get('pushName') or format_number(remote_jid)
+                    sender_label = contact.get('pushName', '') or msg.get('pushName', "") or format_number(remote_jid)
                 else:
                     sender_label = msg.get("pushName", "")
             status = self._map_status(msg)

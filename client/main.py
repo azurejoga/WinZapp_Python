@@ -66,9 +66,9 @@ class MainWindow(wx.Frame):
         self.conversations_panel = ConversationsPanel(self, self.content_panel)
         self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.create_accelerator_table()
+        self.Show()
         #Set offline chats for the first time
         self.set_chats()
-        self.Show()
         app.MainLoop()
 
     def create_accelerator_table(self):
@@ -216,7 +216,6 @@ class MainWindow(wx.Frame):
                 chat["messages"] = {}
                 chats[chat.get("remoteJid", "")] = chat
             self.save_data(chats, self.contacts)
-            self.chat_ids = [chat.get("remoteJid", "") for chat in response_data]
             return chats
         except Exception as e:
             self.error_sound.play()
@@ -278,11 +277,18 @@ class MainWindow(wx.Frame):
         self.chat_names = []
         for chat in self.chats.values():
             self.chat_names.append(chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
-        self.add_chats_to_ui()
+        #Checks if window is still open
+        if self.IsShown():
+            self.add_chats_to_ui()
+        #Save copy of chats and chat_names
+        self.conversations_panel.chats_list = list(self.chats.values())
+        self.conversations_panel.chat_names = list(self.chat_names)
 
     def preselect_conversations(self):
-        self.conversations_panel.conversations_list.Focus(0)
-        self.conversations_panel.conversations_list.Select(0)
+        #Checks if window is still open
+        if self.IsShown():
+            self.conversations_panel.conversations_list.Focus(0)
+            self.conversations_panel.conversations_list.Select(0)
 
     def sync_remote_chats(self):
         for chat in self.chats.values():
@@ -303,7 +309,9 @@ class MainWindow(wx.Frame):
         if chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
             self.save_data(self.chats, self.contacts)
-            wx.CallAfter(self.set_chats)
+            #Checks if window is still open
+            if self.IsShown():
+                wx.CallAfter(self.set_chats)
 
     def add_chats_to_ui(self):
         self.conversations_panel.conversations_list.DeleteAllItems()

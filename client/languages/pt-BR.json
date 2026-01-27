@@ -14,6 +14,7 @@
     "token_retrieval_failed": "Falha ao recuperar o token do usuário.",
     "main_nav": "&Navegação principal",
     "conversations": "Conversas",
+    "search_conversations": "Pesquisar nas conversas",
     "chat_retrieval_failed": "Falha ao obter a lista de conversas do servidor.",
     "chat_load_failed": "Não foi possível carregar o seu arquivo local de mensagens. Reinicie o programa e tente novamente.",
     "contact_retrieval_failed": "Falha ao obter a lista de contatos.",
