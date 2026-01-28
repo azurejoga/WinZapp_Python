@@ -40,5 +40,6 @@
     "synchronizing": "Sincronizando",
     "sync_complete": "Conversas sincronizadas.",
     "offline_mode_enabled": "Modo offline ativado. Algumas funcionalidades podem estar indisponíveis.",
-    "offline_mode": "Modo Offline"
+    "offline_mode": "Modo Offline",
+    "close_conversation": "&Fechar conversa"
 }

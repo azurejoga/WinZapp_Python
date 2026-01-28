@@ -30,6 +30,7 @@ class ConversationsPanel(wx.Panel):
         self.conversations_list = wx.ListCtrl(self, size=(380, 200), pos=(10, 40), style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.conversations_list.InsertColumn(0, self.main_window.i18n.t("conversations"), width=200)
         self.conversations_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_conversation_selected)
+        self.conversations_list.Bind(wx.EVT_CONTEXT_MENU, self.on_conversations_context_menu)
         self.conversation_panel = wx.Panel(self)
         self.conversation_panel.Hide() #hidden by default
         # Messages list: single-column (name of the list is the header)
@@ -83,14 +84,17 @@ class ConversationsPanel(wx.Panel):
         #Set IDs
         self.ID_CTRL_R = wx.NewIdRef()
         self.ID_ESC = wx.NewIdRef()
+        self.CTRL_W = wx.NewIdRef()
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL, ord('R'), self.ID_CTRL_R),
-            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESC)
+            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, self.ID_ESC),
+            (wx.ACCEL_CTRL, ord('W'), self.CTRL_W)
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message, id=self.ID_CTRL_R)
         self.Bind(wx.EVT_MENU, self.close_conversation, id=self.ID_ESC)
+        self.Bind(wx.EVT_MENU, self.close_conversation, id=self.CTRL_W)
 
 
     def on_search_query_changed(self, event):
@@ -127,6 +131,28 @@ class ConversationsPanel(wx.Panel):
     def close_conversation(self, event):
         self.conversation_panel.Hide()
         self.conversations_list.SetFocus()
+
+    def on_conversations_context_menu(self, event):
+        # Only show context menu if a conversation is selected
+        selected_index = self.conversations_list.GetFirstSelected()
+        if selected_index == -1:
+            return
+        
+        # Create context menu
+        menu = wx.Menu()
+        close_item = menu.Append(wx.ID_ANY, f"{self.main_window.i18n.t('close_conversation')}\tCtrl+W")
+        
+        # Bind menu item to close_conversation method
+        self.Bind(wx.EVT_MENU, self.on_context_menu_close, close_item)
+        
+        # Show the menu
+        self.PopupMenu(menu)
+        menu.Destroy()
+
+    def on_context_menu_close(self, event):
+        # Only close if conversation panel is visible
+        if self.conversation_panel.IsShown():
+            self.close_conversation(event)
 
     def _extract_timestamp(self, msg):
         # Use API field `messageTimestamp` (seconds). 
