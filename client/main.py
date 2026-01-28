@@ -139,7 +139,7 @@ class MainWindow(wx.Frame):
         else:
             self.offline_mode_sound.play()
             self.output(self.i18n.t("offline_mode_enabled"))
-        self.monitor_thread = threading.Thread(target=self.monitor_internet_connection)
+        self.monitor_thread = threading.Thread(target=self.monitor_internet_connection, daemon=True)
         self.monitor_thread.start()
 
     def start_sync(self):

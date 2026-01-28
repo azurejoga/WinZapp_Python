@@ -43,5 +43,15 @@
     "offline_mode_enabled": "Modo offline ativado. Algumas funções podem estar indisponíveis.",
     "connection_restored": "Conexão com a internet restabelecida.",
     "connection_lost": "Conexão com a internet perdida.",
-    "close_conversation": "&Fechar conversa"
+    "close_conversation": "&Fechar conversa",
+    "message_type_audio": "áudio",
+    "duration": "duração",
+    "second": "segundo",
+    "seconds": "segundos",
+    "minute": "minuto",
+    "minutes": "minutos",
+    "hour": "hora",
+    "hours": "horas",
+    "and": "e",
+    "unsupported_message": "este conteúdo não é compatível com o WinZapp no momento. Por favor, aguarde até as próximas atualizações"
 }

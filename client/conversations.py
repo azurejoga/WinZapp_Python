@@ -178,6 +178,71 @@ class ConversationsPanel(wx.Panel):
         except Exception:
             return ""
 
+    def _format_duration(self, seconds):
+        """Format duration in seconds to a human-readable string."""
+        if seconds is None:
+            return ""
+        
+        try:
+            seconds = int(seconds)
+        except (ValueError, TypeError):
+            return ""
+        
+        i18n = self.main_window.i18n
+        
+        if seconds < 60:
+            # Less than a minute: "X segundos" or "1 segundo"
+            if seconds == 1:
+                return f"{seconds} {i18n.t('second')}"
+            else:
+                return f"{seconds} {i18n.t('seconds')}"
+        elif seconds < 3600:
+            # Less than an hour: "X minutos e Y segundos"
+            minutes = seconds // 60
+            secs = seconds % 60
+            
+            min_str = i18n.t('minute') if minutes == 1 else i18n.t('minutes')
+            sec_str = i18n.t('second') if secs == 1 else i18n.t('seconds')
+            
+            return f"{minutes} {min_str} {i18n.t('and')} {secs} {sec_str}"
+        else:
+            # One hour or more: "X horas, Y minutos e Z segundos"
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            secs = seconds % 60
+            
+            hour_str = i18n.t('hour') if hours == 1 else i18n.t('hours')
+            min_str = i18n.t('minute') if minutes == 1 else i18n.t('minutes')
+            sec_str = i18n.t('second') if secs == 1 else i18n.t('seconds')
+            
+            return f"{hours} {hour_str}, {minutes} {min_str} {i18n.t('and')} {secs} {sec_str}"
+
+    def _get_message_content(self, msg):
+        """Extract message content based on message type."""
+        message_type = msg.get('messageType', 'conversation')
+        message_obj = msg.get('message') or {}
+        
+        if not isinstance(message_obj, dict):
+            return self.main_window.i18n.t('unsupported_message')
+        
+        i18n = self.main_window.i18n
+        
+        # Supported message types
+        if message_type == "audioMessage":
+            # Extract audio information
+            audio_msg = message_obj.get('audioMessage', {})
+            if isinstance(audio_msg, dict):
+                duration = audio_msg.get('seconds')
+                duration_str = self._format_duration(duration)
+                return f"{i18n.t('message_type_audio')}, {i18n.t('duration')}: {duration_str}"
+            return i18n.t('message_type_audio')
+        elif message_type == 'conversation':
+            # Text message
+            return message_obj.get('conversation', '')
+        else:
+            # Unsupported message type
+            return i18n.t('unsupported_message')
+
     def _map_status(self, msg):
         # Map common ack/status fields to localized strings
         i18n = self.main_window.i18n
@@ -227,11 +292,8 @@ class ConversationsPanel(wx.Panel):
             # According to API sample: record has `messageTimestamp`, `message.conversation`, `pushName`, `key.fromMe`, `MessageUpdate`
             ts = self._extract_timestamp(msg)
             time_str = self._format_date(ts) if ts else ""
-            # body is inside message.conversation for conversation messages
-            body = ""
-            message_obj = msg.get('message') or {}
-            if isinstance(message_obj, dict):
-                body = message_obj.get('conversation') or ''
+            # Extract message content based on type
+            body = self._get_message_content(msg)
             # sender info
             if msg.get('key', {}).get('fromMe'):
                 sender_label = self.main_window.i18n.t('sender_you')
