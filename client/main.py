@@ -13,7 +13,8 @@ from connect import Connect
 from navigation import NavigationPanel
 from conversations import ConversationsPanel
 import json
-from traceback import format_exc
+from traceback import format_exc, format_exception
+import pyperclip
 
 class MainWindow(wx.Frame):
     def __init__(self, title):
@@ -29,17 +30,20 @@ class MainWindow(wx.Frame):
         self.settings = {}
         self.load_settings()
 
+        #Initialize helper classes
+        self.connect = Connect(self)
+        self.i18n = I18n(self)
+        self.i18n.get_language()
+
+        #bind exception global handler for unexpected errors
+        sys.excepthook = self.exception_handler
+
         #Get connection settings
         self.authentication_server = self.settings.get("connection", {}).get("authentication_server", "127.0.0.1")
         self.authentication_port = self.settings.get("connection", {}).get("authentication_port", 8081)
         self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "127.0.0.1")
         self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 8080)
 
-        #Initialize helper classes
-        self.connect = Connect(self)
-        #Initialize i18n
-        self.i18n = I18n(self)
-        self.i18n.get_language()
         #Check Internet Connection
         self.offline_mode = not check_internet_connection()
         #Play startup sound
@@ -359,6 +363,60 @@ class MainWindow(wx.Frame):
     def retrieve_secret_key(self):
         key_file = os.path.join(os.getcwd(), "data", "secret.key")
         return retrieve_key(key_file)
+
+    def exception_handler(self, exc_type, exc_value, exc_traceback):
+        """Global exception handler for unexpected errors."""
+        # Format the full traceback
+        error_text = ''.join(format_exception(exc_type, exc_value, exc_traceback))
+
+        #Play error sound
+        self.error_sound.play()
+        
+        # Create error dialog
+        dialog = wx.Dialog(None, title=self.i18n.t("error"), size=(600, 400), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        
+        panel = wx.Panel(dialog)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Error message
+        message_text = wx.StaticText(panel, label=self.i18n.t("unexpected_error_message"))
+        sizer.Add(message_text, 0, wx.ALL, 10)
+
+        #Error details label
+        details_label = wx.StaticText(panel, label=self.i18n.t("error_details"))
+        sizer.Add(details_label, 0, wx.LEFT | wx.TOP, 10)
+        
+        # Error details text control (read-only, multiline)
+        error_ctrl = wx.TextCtrl(panel, value=error_text, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
+        sizer.Add(error_ctrl, 1, wx.ALL | wx.EXPAND, 10)
+        
+        # Buttons
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Copy button
+        copy_btn = wx.Button(panel, label=self.i18n.t("copy_error_text"))
+        copy_btn.Bind(wx.EVT_BUTTON, lambda evt: self.on_copy_error(error_text))
+        button_sizer.Add(copy_btn, 0, wx.ALL, 5)
+        
+        # Close button
+        close_btn = wx.Button(panel, id=wx.ID_CANCEL, label=self.i18n.t("close"))
+        button_sizer.Add(close_btn, 0, wx.ALL, 5)
+        
+        sizer.Add(button_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
+        
+        panel.SetSizer(sizer)
+        
+        # Show dialog
+        dialog.ShowModal()
+        dialog.Destroy()
+    
+    def on_copy_error(self, error_text):
+        """Copy error text to clipboard."""
+        try:
+            pyperclip.copy(error_text)
+            self.output(self.i18n.t("error_copied"), interrupt=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

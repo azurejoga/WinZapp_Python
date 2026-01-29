@@ -53,5 +53,10 @@
     "hour": "hora",
     "hours": "horas",
     "and": "e",
-    "unsupported_message": "este conteúdo não é compatível com o WinZapp no momento. Por favor, aguarde até as próximas atualizações"
+    "unsupported_message": "este conteúdo não é compatível com o WinZapp no momento. Por favor, aguarde até as próximas atualizações",
+    "unexpected_error_message": "O WinZapp encontrou um erro inesperado e não pôde concluir a operação.",
+    "error_details": "Detalhes do erro:",
+    "copy_error_text": "&Copiar texto do erro para a área de transferência",
+    "close": "&Fechar",
+    "error_copied": "Texto do erro copiado."
 }
