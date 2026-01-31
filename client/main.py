@@ -320,10 +320,10 @@ class MainWindow(wx.Frame):
     def sync_remote_chats(self):
         for chat in self.chats.values():
             self.sync_chat_messages(chat)
-        #Update chat names
-        self.chat_names.clear()
-        for chat in self.chats.values():
-            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
+        #Update chat names after getting new messages
+            self.chat_names.clear()
+            for chat in self.chats.values():
+                self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
 
     def sync_chat_messages(self, chat):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
