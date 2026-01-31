@@ -46,6 +46,10 @@ class MainWindow(wx.Frame):
         self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 8080)
         self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "wss://127.0.0.1")
 
+        #Set basic variables
+        self.chats = {}
+        self.chat_names = []
+
         #Check Internet Connection
         self.offline_mode = not check_internet_connection()
         #Play startup sound
@@ -73,6 +77,8 @@ class MainWindow(wx.Frame):
         self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.create_accelerator_table()
         self.Show()
+        for chat in self.chats.values():
+            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
         #Set offline chats for the first time
         self.set_chats()
         app.MainLoop()
@@ -154,7 +160,7 @@ class MainWindow(wx.Frame):
     def start_sync(self):
         self.connected_sound.play()
         self.chats = self.get_remote_chats()
-        self.normalize_chats()
+        self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_remote_contacts()
         self.synchronizing_sound.play()
         self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('synchronizing')}")
@@ -232,11 +238,12 @@ class MainWindow(wx.Frame):
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('chat_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
 
-    def normalize_chats(self):
-        for key, chat in self.chats.items():
+    def normalize_chats(self, chats):
+        for key, chat in chats.items():
             if chat["unreadCount"] is None:
                 chat["unreadCount"] = 0
-            self.chats[key] = chat
+            chats[key] = chat
+        return chats
 
     def save_data(self, chats, contacts):
         #Save back to file
@@ -285,9 +292,7 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
 
     def set_chats(self):
-        self.chat_names = []
-        for chat in self.chats.values():
-            self.chat_names.append(chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
+
         #Checks if window is still open
         if self.IsShown():
             self.add_chats_to_ui()
@@ -295,6 +300,17 @@ class MainWindow(wx.Frame):
         self.conversations_panel.chats_list = list(self.chats.values())
         self.conversations_panel.chat_names = list(self.chat_names)
         self.preselect_conversations()
+
+    def find_name_through_messages(self, chat):
+        #Find a message that is not from you
+        for message in chat["messages"].get("messages", {}).get("records", []):
+            #If pushName is a phone number, ignore
+            if message.get("pushName", "") and message.get("pushName", "").startswith(message.get("key", {}).get("remoteJid", "").split("@")[0]):
+                continue
+            if not message.get("key", {}).get("fromMe"):
+                #Return the message push name
+                return message.get("pushName", "")
+        return None
 
     def preselect_conversations(self):
         #Checks if window is still open
@@ -320,12 +336,16 @@ class MainWindow(wx.Frame):
         chat["messages"] = response_data
         for message in chat["messages"].get("messages", {}).get("records", []):
             self.sync_if_media(message)
+
+        self.chat_names.clear()
+        for chat in self.chats.values():
+            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
         if chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
-            self.save_data(self.chats, self.contacts)
             #Checks if window is still open
             if self.IsShown():
                 wx.CallAfter(self.set_chats)
+            self.save_data(self.chats, self.contacts)
 
     def sync_if_media(self, msg):
         #Check message type

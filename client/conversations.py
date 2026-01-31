@@ -51,11 +51,14 @@ class ConversationsPanel(wx.Panel):
     def on_conversation_selected(self, event):
         index = event.GetIndex()
         try:
-            self.conversation = self.chats_list[index]
-            self.conversation_name = self.chat_names[index]
-            # self.main_window.output(str(self.conversation.get("messages", [])))
+            self.navigate_to_conversation(self.chats_list[index])
         except Exception:
             return
+
+
+    def navigate_to_conversation(self, conversation):
+        self.conversation = conversation
+        self.conversation_name = self.main_window.find_name_through_messages(conversation) or conversation.get("pushName", "") or format_number(conversation.get("remoteJid", ""))
         self.message_label.SetLabel(f"{self.main_window.i18n.t('type_message')} {self.conversation_name}")
         self.conversation_panel.Show()
         self.preselect_messages()
@@ -68,7 +71,6 @@ class ConversationsPanel(wx.Panel):
             self.search_field.Clear()
         # Populate messages list from local store
         self.populate_messages()
-
 
     def preselect_messages(self):
         self.messages_list.Focus(0)
@@ -305,13 +307,7 @@ class ConversationsPanel(wx.Panel):
             if msg.get('key', {}).get('fromMe'):
                 sender_label = self.main_window.i18n.t('sender_you')
             else:
-                #Check if there's a contact with the same remoteJid
-                remote_jid = msg.get('key', {}).get('remoteJid', '')
-                contact = self.main_window.contacts.get(remote_jid)
-                if contact and contact.get("type", "") == 'contact':
-                    sender_label = contact.get('pushName', '') or msg.get('pushName', "") or format_number(remote_jid)
-                else:
-                    sender_label = msg.get("pushName", "")
+                sender_label = msg.get("pushName", "")
             status = self._map_status(msg)
             body = (body or '').replace('\n', ' ')
             pieces = [f"{sender_label}: {body}" ]
