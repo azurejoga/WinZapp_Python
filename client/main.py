@@ -162,7 +162,6 @@ class MainWindow(wx.Frame):
         self.chats = self.get_remote_chats()
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_remote_contacts()
-        self.chat_names.clear()
         self.synchronizing_sound.play()
         self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('synchronizing')}")
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
@@ -293,14 +292,13 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
 
     def set_chats(self):
-
-        #Checks if window is still open
-        if self.IsShown():
-            self.add_chats_to_ui()
         #Save copy of chats and chat_names
         self.conversations_panel.chats_list = list(self.chats.values())
         self.conversations_panel.chat_names = list(self.chat_names)
-        self.preselect_conversations()
+        #Checks if window is still open
+        if self.IsShown():
+            self.add_chats_to_ui()
+            self.preselect_conversations()
 
     def find_name_through_messages(self, chat):
         #Find a message that is not from you
@@ -322,6 +320,10 @@ class MainWindow(wx.Frame):
     def sync_remote_chats(self):
         for chat in self.chats.values():
             self.sync_chat_messages(chat)
+        #Update chat names
+        self.chat_names.clear()
+        for chat in self.chats.values():
+            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
 
     def sync_chat_messages(self, chat):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
@@ -338,7 +340,6 @@ class MainWindow(wx.Frame):
         for message in chat["messages"].get("messages", {}).get("records", []):
             self.sync_if_media(message)
 
-        self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
         if chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
             #Checks if window is still open
