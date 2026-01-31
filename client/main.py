@@ -301,10 +301,13 @@ class MainWindow(wx.Frame):
             self.preselect_conversations()
 
     def find_name_through_messages(self, chat):
+        #If it's a chat group, ignore
+        if chat.get("remoteJid", "").endswith("@g.us"):
+            return None
         #Find a message that is not from you
         for message in chat["messages"].get("messages", {}).get("records", []):
             #If pushName is a phone number, ignore
-            if message.get("pushName", "") and message.get("pushName", "").startswith(message.get("key", {}).get("remoteJid", "").split("@")[0]):
+            if message.get("pushName", "") and message.get("pushName", "").isdigit():
                 continue
             if not message.get("key", {}).get("fromMe"):
                 #Return the message push name
@@ -345,7 +348,7 @@ class MainWindow(wx.Frame):
             #Checks if window is still open
             if self.IsShown():
                 wx.CallAfter(self.set_chats)
-            self.save_data(self.chats, self.contacts)
+                self.save_data(self.chats, self.contacts)
 
     def sync_if_media(self, msg):
         #Check message type
