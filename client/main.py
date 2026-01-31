@@ -408,6 +408,12 @@ class MainWindow(wx.Frame):
     def add_chats_to_ui(self):
         self.conversations_panel.conversations_list.DeleteAllItems()
         for index, chat in enumerate(self.chats.values()):
+            #If search field has text, filter chats
+            if self.conversations_panel.search_field.GetValue().strip():
+                search_text = self.conversations_panel.search_field.GetValue().strip().lower()
+                chat_name = self.chat_names[index].lower()
+                if search_text not in chat_name:
+                    continue
             string = f"\
             {self.chat_names[index]} \
             {f"{chat.get('unreadCount') or 0} {self.i18n.t('unread_messages') if int(chat.get('unreadCount')) > 1 else self.i18n.t('unread_message')} " if int(chat.get('unreadCount')) > 0 else ""}\
