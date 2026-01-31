@@ -1,6 +1,7 @@
 import os
 from pyexpat.errors import messages
 import sys
+import time
 import threading
 import requests
 import base64
@@ -131,6 +132,7 @@ class MainWindow(wx.Frame):
         self.connected_sound = Sound(self.sound_system, "connected.ogg")
         self.synchronizing_sound = Sound(self.sound_system, "synchronizing.ogg")
         self.sync_complete_sound = Sound(self.sound_system, "sync_complete.ogg")
+        wx.CallAfter(self.set_chats)
         self.offline_mode_sound = Sound(self.sound_system, "offline_mode.ogg")
 
     def retrieve_token(self):
@@ -170,7 +172,6 @@ class MainWindow(wx.Frame):
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
         self.sync_remote_chats()
         self.sync_complete_sound.play()
-        wx.CallAfter(self.set_chats)
         self.SetTitle(f"{self.i18n.t('app_name')}")
         self.output(self.i18n.t("sync_complete"))
         wx.CallAfter(self.preselect_conversations)
@@ -306,7 +307,6 @@ class MainWindow(wx.Frame):
         #Checks if window is still open
         if self.IsShown():
             self.add_chats_to_ui()
-            self.preselect_conversations()
 
     def find_name_through_messages(self, chat):
         #If it's a chat group, ignore
@@ -330,7 +330,7 @@ class MainWindow(wx.Frame):
 
     def sync_remote_chats(self):
         for chat in self.chats.values():
-            self.sync_chat_messages(chat)
+            self.sync_chat_messages(chat.copy())
 
     def sync_chat_messages(self, chat):
         url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
@@ -352,7 +352,7 @@ class MainWindow(wx.Frame):
         if chat.get("messages", {}) and chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
             wx.CallAfter(self.set_chats)
-        self.save_data(self.chats, self.contacts)
+            self.save_data(self.chats, self.contacts)
 
     def sync_if_media(self, msg):
         #Check message type
