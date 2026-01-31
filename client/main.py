@@ -162,6 +162,7 @@ class MainWindow(wx.Frame):
         self.chats = self.get_remote_chats()
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_remote_contacts()
+        self.chat_names.clear()
         self.synchronizing_sound.play()
         self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('synchronizing')}")
         self.output(self.i18n.t("synchronization_started"), interrupt=True)
@@ -337,9 +338,7 @@ class MainWindow(wx.Frame):
         for message in chat["messages"].get("messages", {}).get("records", []):
             self.sync_if_media(message)
 
-        self.chat_names.clear()
-        for chat in self.chats.values():
-            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
+        self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or format_number(chat.get("remoteJid", "")))
         if chat["messages"] != self.chats[chat.get("remoteJid", "")].get("messages", {}): #update only if necessary
             self.chats[chat.get("remoteJid", "")] = chat
             #Checks if window is still open
