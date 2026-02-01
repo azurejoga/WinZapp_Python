@@ -307,7 +307,7 @@ class ConversationsPanel(wx.Panel):
             if msg.get('key', {}).get('fromMe'):
                 sender_label = self.main_window.i18n.t('sender_you')
             else:
-                sender_label = msg.get("pushName", "")
+                sender_label = msg.get("pushName", "") if not msg.get("pushName", "").isdigit() else format_number(msg.get("key", {}).get("remoteJid", ""))
             status = self._map_status(msg)
             body = (body or '').replace('\n', ' ')
             pieces = [f"{sender_label}: {body}" ]

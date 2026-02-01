@@ -17,9 +17,11 @@ class Connect:
         self.i18n.get_language()
 
     def check_connection_status(self):
-        #Look for a valid user token file
-        user_token_path = os.path.join(os.getcwd(), "data", "token.tk")
-        return os.path.isfile(user_token_path)
+        #Check if both WA_phone_number and WA_token are available in settings
+        private_info = self.main_window.settings.get("privateinfo", {})
+        if private_info.get("WA_phone_number") and private_info.get("WA_token"):
+            return True
+        return False
 
     def show_connection_dial(self):
         self.connection_dial = wx.Dialog(None, title=self.i18n.t("connect_phone").format(app_name=self.main_window.app_name), size=(300, 150))
