@@ -332,7 +332,7 @@ class MainWindow(wx.Frame):
             self.sync_chat_messages(chat.copy())
 
     def sync_chat_messages(self, chat):
-        url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}/page/2"
+        url = f"{self.evolution_server}:{self.evolution_port}/chat/findMessages/{self.token}"
 
         payload = { "where": { "key": { "remoteJid": chat.get("remoteJid", "")} } }
         headers = {
