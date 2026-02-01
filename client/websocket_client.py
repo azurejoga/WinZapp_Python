@@ -23,8 +23,8 @@ class WebSocketClient:
         #Bind events
         self.sio.on("connect", self.on_connect)
         self.sio.on("disconnect", self.on_disconnect)
-        self.sio.on("connection.update", self.on_connection_update)
-        self.sio.on("qrcode.updated", self.on_qrcode_update)
+        self.sio.on("connection.update", self.on_connection_update, namespace=f"/{self.instance_name}")
+        self.sio.on("qrcode.updated", self.on_qrcode_update, namespace=f"/{self.instance_name}")
 
     def on_connect(self):
         print("WebSocket connected.")
