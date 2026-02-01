@@ -3,6 +3,7 @@
 client/data/messages.dat
 client/data/secret.key
 client/data/token.tk
+client/data/token.tk2
 client/data/media
 client/data/voice_messages
 client/logs
