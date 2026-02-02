@@ -80,9 +80,12 @@ class Connect:
             response_data = response.json()
             print(response_data)
 
-            #Connect WebSocket
-            self.main_window.connect_websocket()
-            self.show_pairing_dial(response_data.get("pairingCode"))
+            if response_data.get("pairingCode"):
+                #Connect WebSocket
+                self.main_window.connect_websocket()
+                self.show_pairing_dial(response_data.get("pairingCode"))
+            else:
+                wx.MessageBox(self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name), self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
 
         except Exception as e:
             self.main_window.error_sound.play()
