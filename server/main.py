@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel, field_validator
-load_dotenv()
+load_dotenv(os.path.join(os.getcwd(), '.env'))
 HOST = os.getenv("HOST")
 PORT = os.getenv("PORT")
 EVOLUTION_HOST = os.getenv("EVOLUTION_HOST")
