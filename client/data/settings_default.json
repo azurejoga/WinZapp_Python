@@ -12,10 +12,10 @@
     },
     "status": {
         "terms_alert_displayed": false,
-        "messages_set_completed": true
+        "messages_set_completed": false
     },
     "privateinfo": {
-        "WA_phone_number": "5551995510189",
-        "WA_token": "a36ee7348e57139eccc6b115f53b6b34"
+        "WA_phone_number": "",
+        "WA_token": ""
     }
 }
