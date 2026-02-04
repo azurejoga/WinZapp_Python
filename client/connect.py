@@ -198,13 +198,13 @@ class Connect:
             wx.MessageBox(f"{self.i18n.t('websocket_init_failed')} {format_exc()}", self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
 
     def on_continue(self, event):
-
         #Tries to create the instance
         try:
             url = f"{self.main_window.authentication_server}:{self.main_window.authentication_port}/create_instance/"
             self.phone_number = self.phone_field.GetValue()
             #Ensure messages_set_completed is set to False
             self.main_window.settings["status"]["messages_set_completed"] = False
+            self.main_window.save_settings()
             #Check if the user has already tried to connect with this number
             if self.main_window.settings.get("privateinfo", {}).get("WA_phone_number", "") == self.phone_number and self.main_window.settings.get("privateinfo", {}).get("WA_token", ""):
                 #Assume token available
@@ -216,15 +216,15 @@ class Connect:
                     self.main_window.settings["privateinfo"] = {}
                 self.main_window.settings["privateinfo"]["WA_phone_number"] = self.phone_number
                 self.main_window.settings["privateinfo"]["WA_token"] = self.main_window.token
-                #Create new instance
-                data = {
-                    "name": self.main_window.token,
-                    "number": self.phone_number,
-                    "token": self.main_window.token
-                }
-                response = requests.post(url, json=data, verify=False)
-                response_data = response.json()
-                print(response_data)
+            #Create new instance
+            data = {
+                "name": self.main_window.token,
+                "number": self.phone_number,
+                "token": self.main_window.token
+            }
+            response = requests.post(url, json=data, verify=False)
+            response_data = response.json()
+            print(response_data)
 
             #Save settings
             self.main_window.save_settings()
