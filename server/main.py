@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from typing import Optional
 load_dotenv(os.path.join(os.getcwd(), '.env'))
 HOST = os.getenv("HOST")
 PORT = os.getenv("PORT")
@@ -63,7 +64,7 @@ async def security_headers_middleware(request: Request, call_next):
 
 class Instance(BaseModel):
     name: str
-    number: str
+    number: Optional[str] = None
     token: str
 
 @app.post("/create_instance/")
@@ -83,10 +84,11 @@ def add_instance(name, number, token):
     payload = {
         "instanceName": name,
         "integration": "WHATSAPP-BAILEYS",
-        "number": number,
         "token": token,
         "syncFullHistory": False
     }
+    if number:
+        payload["number"] = number
     headers = {
         "apikey": APIKEY,
         "Content-Type": "application/json"
