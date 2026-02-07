@@ -117,6 +117,7 @@ class Connect:
         try:
             # Ensure messages_set_completed is set to False
             self.main_window.settings["status"]["messages_set_completed"] = False
+            self.main_window.save_settings()
             
             # Generate token if not already set
             if not self.main_window.settings.get("privateinfo", {}).get("WA_token"):
@@ -158,7 +159,7 @@ class Connect:
                 # Display QR-CODE image
                 self.display_qrcode_image(response_data.get("base64"))
             else:
-                wx.MessageBox(self.i18n.t("no_pairing_code_received").format(app_name=self.main_window.app_name), self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
+                wx.MessageBox(self.i18n.t("no_QRcode_received").format(app_name=self.main_window.app_name), self.i18n.t("connection_error"), wx.OK | wx.ICON_ERROR)
                 
         except Exception as e:
             self.main_window.error_sound.play()

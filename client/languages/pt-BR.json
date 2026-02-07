@@ -38,6 +38,7 @@
     "token_save_failed": "Falha ao salvar o token do usuário.",
     "instance_state_changed": "Ocorreu um evento inesperado. O status da instância mudou ou parece estar desconectado. Por favor, tente realizar o pareamento novamente.",
     "no_pairing_code_received": "Não foi possível conectar ao {app_name}. Nenhum código de pareamento foi recebido.",
+    "no_QRcode_received": "Não foi possível conectar ao {app_name}. Nenhum QR-CODE foi recebido.",
     "settings_load_failed": "Falha ao carregar o arquivo de configuração:",
     "settings_save_failed": "Ocorreu um erro ao salvar as configurações:",
     "data_save_failed": "Ocorreu um erro ao salvar o arquivo de mensagens:",
