@@ -1,11 +1,14 @@
-import os
+﻿import os
 import sys
 import time
 import shutil
+import socket as _socket
+import subprocess
 import threading
 import requests
 import base64
 import socketio
+import atexit
 from accessible_output2 import outputs
 from sound_system import SoundSystem, Sound
 from i18n import I18n
@@ -46,17 +49,23 @@ class MainWindow(wx.Frame):
 
         self.ws = None
 
-        #Get connection settings
-        self.authentication_server = self.settings.get("connection", {}).get("authentication_server", "127.0.0.1")
-        self.authentication_port = self.settings.get("connection", {}).get("authentication_port", 8081)
-        self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "127.0.0.1")
-        self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 8080)
-        self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "wss://127.0.0.1")
+        #Get connection settings (no authentication_server - Evolution runs locally)
+        self.evolution_server = self.settings.get("connection", {}).get("evolution_server", "http://127.0.0.1")
+        self.evolution_port = self.settings.get("connection", {}).get("evolution_port", 3414)
+        self.evolution_ws_server = self.settings.get("connection", {}).get("evolution_ws_server", "ws://127.0.0.1")
+        self.evolution_api_key = self.settings.get("connection", {}).get("evolution_api_key", "wz-local-api-key")
 
         #Set basic variables
         self.chats = {}
         self.chat_names = []
         self.contacts = {}
+
+        # Check and install API modules if needed (first run only)
+        self.ensure_api_modules_installed()
+
+        #Start local Evolution API (if bundled)
+        self.evolution_process = None
+        self.ensure_evolution_running()
 
         #Check Internet Connection
         self.offline_mode = not check_internet_connection()
@@ -112,6 +121,114 @@ class MainWindow(wx.Frame):
 
     def connect_websocket(self):
         self.ws.sio.connect(f"{self.evolution_ws_server}:{self.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.token}, namespaces=[f"/{self.token}"])
+
+    # ── First-run module installation ──────────────────────────────────────
+
+    def ensure_api_modules_installed(self):
+        """
+        If api/start.js is present but api/node_modules is absent, show the
+        module-install dialog.  The dialog runs `npm install` + `npm run
+        db:generate` in the background.  If the user cancels or an error
+        occurs, the application exits immediately.
+        """
+        start_js     = resource_path("api", "start.js")
+        node_modules = resource_path("api", "node_modules")
+        # Nothing to do: no bundled api/, or modules already installed
+        if not os.path.isfile(start_js) or os.path.isdir(node_modules):
+            return
+        from module_install import ModuleInstallDialog
+        dlg    = ModuleInstallDialog(self)
+        result = dlg.ShowModal()
+        dlg.Destroy()
+        if result != wx.ID_OK:
+            sys.exit(0)
+
+    # ── Evolution API lifecycle ─────────────────────────────────────────────
+
+    def _is_evolution_running(self):
+        """Return True if the Evolution API is already listening on the configured port."""
+        try:
+            with _socket.create_connection(("127.0.0.1", self.evolution_port), timeout=1):
+                return True
+        except OSError:
+            return False
+
+    def _start_evolution_background(self):
+        """
+        Launch the bundled Evolution API node process in the background.
+        stdout and stderr are redirected to api/evolution.log so that startup
+        errors can be shown to the user if the port never opens.
+        Does nothing if the node or start.js files are not present (dev mode).
+        """
+        node_exe = resource_path("node", "node.exe")
+        start_js  = resource_path("api",  "start.js")
+        if not os.path.isfile(node_exe) or not os.path.isfile(start_js):
+            return  # Not bundled — developer runs Evolution separately
+        try:
+            self._evolution_log_path = resource_path("api", "evolution.log")
+            log_fh = open(self._evolution_log_path, "w",
+                          encoding="utf-8", errors="replace")
+            self._evolution_log_fh = log_fh
+            self.evolution_process = subprocess.Popen(
+                [node_exe, start_js],
+                cwd=resource_path("api"),
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                stdout=log_fh,
+                stderr=log_fh,
+            )
+            atexit.register(self._stop_evolution)
+        except Exception:
+            pass
+
+    def _stop_evolution(self):
+        """Terminate the Evolution API process and close the log file."""
+        if self.evolution_process and self.evolution_process.poll() is None:
+            try:
+                self.evolution_process.terminate()
+            except Exception:
+                pass
+        log_fh = getattr(self, "_evolution_log_fh", None)
+        if log_fh:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
+
+    def ensure_evolution_running(self):
+        """
+        Start the local Evolution API if it is not already listening, then
+        wait up to 3 minutes for it to become ready via a progress dialog.
+        On first launch the database initialisation and migrations can take
+        60-90 s; subsequent starts are much faster.
+        """
+        if self._is_evolution_running():
+            return  # Already up (e.g. left running from a previous session)
+
+        self._evolution_log_path = None
+        self._evolution_log_fh   = None
+        self._start_evolution_background()
+
+        from api_startup import ApiStartupDialog
+        dlg    = ApiStartupDialog(self, self.evolution_port)
+        result = dlg.ShowModal()
+        dlg.Destroy()
+
+        if result != wx.ID_OK:
+            # Collect the last 40 lines of the evolution log for diagnosis
+            details = ""
+            log_path = getattr(self, "_evolution_log_path", None)
+            if log_path and os.path.isfile(log_path):
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        lines = f.readlines()
+                    details = "".join(lines[-40:]).strip()
+                except Exception:
+                    pass
+            msg = self.i18n.t("api_startup_warning")
+            if details:
+                msg = f"{msg}\n\n{details}"
+            wx.MessageBox(msg, self.app_name, wx.OK | wx.ICON_ERROR)
+            sys.exit(1)
 
     def create_accelerator_table(self):
         #Set IDs
@@ -279,7 +396,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(url, headers=headers, verify=False)
+            response = requests.post(url, headers=headers)
             response_data = response.json()
             for chat in response_data:
                 #If chat is not present
@@ -333,7 +450,7 @@ class MainWindow(wx.Frame):
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(url, headers=headers, verify=False)
+            response = requests.post(url, headers=headers)
             response_data = response.json()
             contacts = {}
             for contact in response_data:
@@ -422,7 +539,7 @@ class MainWindow(wx.Frame):
                 "page": current_page
             }
 
-            response = requests.post(url, json=payload, headers=headers, verify=False)
+            response = requests.post(url, json=payload, headers=headers)
             response_data = response.json()
 
             # Update total_pages based on response
@@ -481,7 +598,7 @@ class MainWindow(wx.Frame):
             "apikey": self.token,
             "Content-Type": "application/json"
         }
-        response = requests.post(url, json=payload, headers=headers, verify=False)
+        response = requests.post(url, json=payload, headers=headers)
         if response.status_code == 201:
             return response.json().get("base64", "")
         return ""
@@ -608,3 +725,4 @@ class MainWindow(wx.Frame):
 if __name__ == "__main__":
     app = wx.App()
     frame = MainWindow()
+

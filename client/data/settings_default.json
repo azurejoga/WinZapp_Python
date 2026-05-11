@@ -1,10 +1,9 @@
 {
     "connection": {
-        "authentication_server": "127.0.0.1",
-        "authentication_port": 8081,
         "evolution_server": "http://127.0.0.1",
-        "evolution_port": 8080,
-        "evolution_ws_server": "ws://127.0.0.1"
+        "evolution_port": 3414,
+        "evolution_ws_server": "ws://127.0.0.1",
+        "evolution_api_key": "wz-local-api-key"
     },
     "general": {
         "language": "pt-BR",

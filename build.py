@@ -2,10 +2,11 @@
 WinZapp build script.
 
 Steps:
-  1. Check required tools (nuitka, gcc, windres)
+  1. Check required tools (nuitka, gcc, windres) and pre-built api/ + node/
   2. Compile client with Nuitka --mode=onefile -> build/WinZapp.exe
        (sounds, languages, lib are external; only Python + wx etc. go inside)
-  3. Assemble staging dir: WinZapp.exe + lib/ + sounds/ + languages/ + data/
+  3. Assemble staging dir:
+       WinZapp.exe + lib/ + sounds/ + languages/ + data/ + node/ + api/
   4. Compile uninstaller -> build/uninstall.exe
   5. Create payload ZIP (ZIP_STORED) from staging/ + uninstall.exe
   6. Compile installer stub -> build/installer_stub.exe
@@ -18,6 +19,18 @@ Visible structure after install / extraction:
   sounds/       <- OGG audio files
   languages/    <- JSON translation files
   data/         <- settings_default.json (bootstrap); settings.json created on first run
+  node/         <- portable Node.js runtime (node.exe + runtime files)
+  api/          <- Evolution API (dist/ + node_modules/ + prisma/ + start.js + .env)
+
+Before running this script you must prepare:
+
+  node/  - download the Windows x64 portable Node.js zip from
+           https://nodejs.org/dist/ (node-vXX.X.X-win-x64.zip)
+           and extract its contents into a 'node/' folder at the project root.
+           Verify: node/node.exe must exist.
+
+  api/   - see api/README-SETUP.md for the one-time Evolution API build steps.
+           Verify: api/dist/main.js must exist.
 
 Usage:
   venv\\Scripts\\python.exe build.py
@@ -37,6 +50,10 @@ INSTALLER_DIR = os.path.join(ROOT_DIR, "installer")
 BUILD_DIR     = os.path.join(ROOT_DIR, "build")
 DIST_DIR      = os.path.join(ROOT_DIR, "dist")
 VENV_DIR      = os.path.join(ROOT_DIR, "venv")
+
+# External pre-built assets (developer prepares these once)
+NODE_DIR      = os.path.join(ROOT_DIR, "node")   # portable Node.js
+API_DIR       = os.path.join(ROOT_DIR, "api")    # pre-built Evolution API
 
 NUITKA_CMD  = os.path.join(VENV_DIR, "Scripts", "nuitka.cmd")
 PYTHON_CMD  = os.path.join(VENV_DIR, "Scripts", "python.exe")
@@ -64,6 +81,11 @@ SITE_PACKAGES = os.path.join(VENV_DIR, "Lib", "site-packages")
 SOUND_LIB_X64 = os.path.join(SITE_PACKAGES, "sound_lib", "lib", "x64")
 AO2_LIB       = os.path.join(SITE_PACKAGES, "accessible_output2", "lib")
 
+# Directories inside api/ that must NOT be copied into the distribution
+# (they are runtime data created on first launch)
+API_EXCLUDE_DIRS = {"pgdata", "instances", "store", ".git", "__pycache__", "node_modules"}
+API_EXCLUDE_FILES = {".gitignore", "README-SETUP.md"}
+
 # -- Helpers -----------------------------------------------------------------
 
 def step(msg):
@@ -78,18 +100,35 @@ def run(cmd, cwd=None):
         print(f"\n[ERROR] Command failed with exit code {result.returncode}.")
         sys.exit(result.returncode)
 
-def walk_dir(root):
-    """Yield (absolute_path, relative_path) for every file under root."""
-    for dirpath, _dirs, files in os.walk(root):
+def walk_dir(root, exclude_top_dirs=None, exclude_top_files=None):
+    """Yield (absolute_path, relative_path) for every file under root.
+
+    exclude_top_dirs  - set of directory names (relative to root) to skip.
+    exclude_top_files - set of file names (relative to root) to skip.
+    """
+    exclude_top_dirs  = exclude_top_dirs  or set()
+    exclude_top_files = exclude_top_files or set()
+    for dirpath, dirs, files in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        # Skip excluded top-level directories
+        top = rel_dir.split(os.sep)[0] if rel_dir != "." else ""
+        if top in exclude_top_dirs:
+            dirs.clear()
+            continue
+        # Prune excluded dirs in-place so os.walk doesn't descend into them
+        dirs[:] = [d for d in dirs if not (rel_dir == "." and d in exclude_top_dirs)]
         for fname in files:
+            # Skip excluded top-level files
+            if rel_dir == "." and fname in exclude_top_files:
+                continue
             abs_path = os.path.join(dirpath, fname)
             rel_path = os.path.relpath(abs_path, root).replace("\\", "/")
             yield abs_path, rel_path
 
-# -- Step 1: Check tools -----------------------------------------------------
+# -- Step 1: Check tools and pre-built assets --------------------------------
 
 def check_tools():
-    step("1/8  Checking required tools")
+    step("1/8  Checking required tools and pre-built assets")
     missing = []
 
     if not os.path.isfile(NUITKA_CMD):
@@ -101,13 +140,39 @@ def check_tools():
         if shutil.which(tool) is None:
             missing.append(f"{name}  (not found in PATH)")
 
+    # Portable Node.js
+    node_exe = os.path.join(NODE_DIR, "node.exe")
+    if not os.path.isfile(node_exe):
+        missing.append(
+            f"node/node.exe  (download portable Node.js for Windows x64 and "
+            f"extract to {NODE_DIR})"
+        )
+
+    # Pre-built Evolution API
+    api_main = os.path.join(API_DIR, "dist", "main.js")
+    if not os.path.isfile(api_main):
+        missing.append(
+            "api/dist/main.js  -- Evolution API not built. In api/ run:\n"
+            "    npm install embedded-postgres --save\n"
+            "    npm install\n"
+            "    npm run db:generate   (generates Prisma client types)\n"
+            "    npm run build"
+        )
+
+    # Prisma client must be generated before building (npm run db:generate)
+    prisma_client = os.path.join(API_DIR, "node_modules", ".prisma", "client", "index.js")
+    if not os.path.isfile(prisma_client) and os.path.isfile(api_main):
+        # dist exists but generated client is missing – warn, don't fail
+        print("  [WARN] api/node_modules/.prisma/client not found.")
+        print("         If the API crashes at runtime, run 'npm run db:generate' in api/.")
+
     if missing:
-        print("\n[ERROR] Missing required tools:")
+        print("\n[ERROR] Missing required tools or pre-built assets:")
         for m in missing:
             print(f"  - {m}")
         sys.exit(1)
 
-    print("  All tools found.")
+    print("  All tools and assets found.")
 
 # -- Step 2: Nuitka onefile compile ------------------------------------------
 
@@ -167,7 +232,7 @@ def assemble_staging():
     # WinZapp.exe (the onefile)
     shutil.copy2(NUITKA_EXE, os.path.join(STAGING_DIR, "WinZapp.exe"))
 
-    # lib/ - BASS DLLs from sound_lib
+    # lib/ - BASS DLLs from sound_lib + screen-reader DLLs from accessible_output2
     lib_dir = os.path.join(STAGING_DIR, "lib")
     os.makedirs(lib_dir)
     dll_count = 0
@@ -177,7 +242,6 @@ def assemble_staging():
                 shutil.copy2(os.path.join(SOUND_LIB_X64, fname),
                              os.path.join(lib_dir, fname))
                 dll_count += 1
-    # accessible_output2 DLLs (NVDA, SAPI, etc.) - copy if present
     if os.path.isdir(AO2_LIB):
         for fname in os.listdir(AO2_LIB):
             if fname.lower().endswith(".dll"):
@@ -204,6 +268,25 @@ def assemble_staging():
     shutil.copy2(SETTINGS_DEFAULT, os.path.join(data_dir, "settings_default.json"))
     print(f"  -> data/settings_default.json")
 
+    # node/ - portable Node.js runtime
+    node_dst = os.path.join(STAGING_DIR, "node")
+    shutil.copytree(NODE_DIR, node_dst)
+    node_count = sum(1 for _, _, fs in os.walk(node_dst) for _ in fs)
+    print(f"  -> node/  ({node_count} files)")
+
+    # api/ - pre-built Evolution API (exclude runtime data directories)
+    api_dst = os.path.join(STAGING_DIR, "api")
+    os.makedirs(api_dst)
+    api_count = 0
+    for abs_path, rel_path in walk_dir(API_DIR,
+                                       exclude_top_dirs=API_EXCLUDE_DIRS,
+                                       exclude_top_files=API_EXCLUDE_FILES):
+        dst = os.path.join(api_dst, rel_path.replace("/", os.sep))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(abs_path, dst)
+        api_count += 1
+    print(f"  -> api/  ({api_count} files)")
+
 # -- Step 4: Compile uninstaller ---------------------------------------------
 
 def compile_uninstaller():
@@ -211,6 +294,7 @@ def compile_uninstaller():
 
     run([
         WINDRES_CMD,
+        "--codepage", "65001",          # source .rc is UTF-8
         os.path.join(INSTALLER_DIR, "uninstaller.rc"),
         "-o", UNINSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
@@ -219,6 +303,8 @@ def compile_uninstaller():
 
     run([
         GCC_CMD,
+        "-finput-charset=UTF-8",        # source .c is UTF-8
+        "-fwide-exec-charset=UTF-16LE", # wchar_t → UTF-16 LE (Windows native)
         os.path.join(INSTALLER_DIR, "uninstaller.c"),
         UNINSTALLER_RES,
         "-o", UNINSTALLER_EXE,
@@ -253,6 +339,7 @@ def compile_installer_stub():
 
     run([
         WINDRES_CMD,
+        "--codepage", "65001",          # source .rc is UTF-8
         os.path.join(INSTALLER_DIR, "installer.rc"),
         "-o", INSTALLER_RES,
         "--include-dir", INSTALLER_DIR,
@@ -261,6 +348,8 @@ def compile_installer_stub():
 
     run([
         GCC_CMD,
+        "-finput-charset=UTF-8",        # source .c is UTF-8
+        "-fwide-exec-charset=UTF-16LE", # wchar_t → UTF-16 LE (Windows native)
         os.path.join(INSTALLER_DIR, "installer.c"),
         INSTALLER_RES,
         "-o", INSTALLER_STUB,

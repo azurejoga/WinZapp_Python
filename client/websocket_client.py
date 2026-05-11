@@ -18,7 +18,6 @@ class WebSocketClient:
         self.i18n.get_language()
 
         self.sio = socketio.Client(
-            ssl_verify=False,
             reconnection=True, reconnection_attempts=5,
             logger=True
         )

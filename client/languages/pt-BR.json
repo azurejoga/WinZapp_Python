@@ -71,5 +71,14 @@
     "decimal_separator": ",",
     "audio_progress_label": "Progresso do áudio",
     "of": "de",
-    "downloading_media": "baixando mídias"
+    "downloading_media": "baixando mídias",
+    "starting_api": "Iniciando o WinZapp, aguarde...",
+    "api_startup_title": "WinZapp | Configurando a API",
+    "api_startup_text": "Iniciando a API do WinZapp. Na primeira execução este processo pode levar até 3 minutos enquanto o banco de dados é preparado. Por favor, aguarde...",
+    "api_startup_warning": "A API do WinZapp não iniciou no tempo esperado. O programa será encerrado.",
+    "module_install_title": "WinZapp: instalando os módulos necessários para o funcionamento do programa",
+    "module_install_text": "Instalando os módulos necessários para o funcionamento do programa. Por favor, aguarde...",
+    "module_install_success": "Os módulos do WinZapp foram instalados com êxito.",
+    "module_install_error": "Ocorreu um erro ao instalar os módulos necessários. O programa será encerrado.",
+    "cancel": "&Cancelar"
 }
