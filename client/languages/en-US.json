@@ -80,5 +80,22 @@
     "module_install_text": "Installing the required modules for the program. Please wait...",
     "module_install_success": "WinZapp modules were installed successfully.",
     "module_install_error": "An error occurred while installing the required modules. The program will close.",
-    "cancel": "&Cancel"
+    "cancel": "&Cancel",
+    "settings": "Settings",
+    "settings_shortcut": "ctrl+comma",
+    "settings_title": "WinZapp | Settings",
+    "tab_general": "General",
+    "tab_connection": "Connection",
+    "language_label": "Language:",
+    "evolution_port_label": "API port (Evolution):",
+    "apply": "&Apply",
+    "invalid_port": "The port must be an integer between 1024 and 65535.",
+    "autostart_label": "Start WinZapp in the background when Windows starts",
+    "autostart_ask_title": "Start WinZapp with Windows",
+    "autostart_ask_message": "Would you like WinZapp to start automatically in the background when you log in to Windows?",
+    "autostart_success_title": "Success",
+    "autostart_success_message": "WinZapp will now start in the background with Windows.",
+    "autostart_error_message": "Could not add the startup entry. Error:"
 }
+
+

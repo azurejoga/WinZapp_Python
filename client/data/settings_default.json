@@ -7,7 +7,9 @@
     },
     "general": {
         "language": "pt-BR",
-        "sounds_enabled": true
+        "sounds_enabled": true,
+        "first_run": true,
+        "autostart": false
     },
     "status": {
         "messages_set_completed": false

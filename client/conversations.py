@@ -122,7 +122,13 @@ class ConversationsPanel(wx.Panel):
         self._stop_audio()
         self._hide_audio_controls()
         self.conversation = conversation
-        self.conversation_name = self.main_window.find_name_through_messages(conversation) or conversation.get("pushName", "") or self.main_window.find_jid_through_messages(conversation) or format_number(conversation.get("remoteJid", ""))
+        self.conversation_name = (
+            self.main_window._resolve_contact_name(conversation)
+            or self.main_window.find_name_through_messages(conversation)
+            or conversation.get("pushName", "")
+            or self.main_window.find_jid_through_messages(conversation)
+            or format_number(conversation.get("remoteJid", ""))
+        )
         self.message_label.SetLabel(f"{self.main_window.i18n.t('type_message')} {self.conversation_name}")
         self.conversation_panel.Show()
         self.Layout()
@@ -189,6 +195,40 @@ class ConversationsPanel(wx.Panel):
         else:
             self.send_message_btn.Hide()
             self.record_voice_message_btn.Show()
+
+    def refresh_labels(self):
+        """Update all translatable labels and column headers after a language change."""
+        i18n = self.main_window.i18n
+
+        # Conversations section
+        self.conversations_label.SetLabel(i18n.t("conversations"))
+        col = wx.ListItem()
+        col.SetText(i18n.t("conversations"))
+        self.conversations_list.SetColumn(0, col)
+
+        self.search_label.SetLabel(i18n.t("search_conversations"))
+
+        # Conversation panel
+        self.messages_label.SetLabel(i18n.t("messages"))
+        col2 = wx.ListItem()
+        col2.SetText(i18n.t("messages"))
+        self.messages_list.SetColumn(0, col2)
+
+        self.audio_progress_label.SetLabel(i18n.t("audio_progress_label"))
+
+        # Message label: keep conversation name if a conversation is open
+        if self.conversation is not None and self.conversation_panel.IsShown():
+            if hasattr(self, "conversation_name") and self.conversation_name:
+                self.message_label.SetLabel(
+                    f"{i18n.t('type_message')} {self.conversation_name}"
+                )
+            else:
+                self.message_label.SetLabel(i18n.t("type_message"))
+        else:
+            self.message_label.SetLabel(i18n.t("type_message"))
+
+        self.send_message_btn.SetLabel(i18n.t("send_message"))
+        self.record_voice_message_btn.SetLabel(i18n.t("record_voice_message"))
 
     def on_record_voice_message(self, event):
         pass

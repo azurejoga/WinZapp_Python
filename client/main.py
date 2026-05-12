@@ -29,6 +29,10 @@ class MainWindow(wx.Frame):
         self.app_name = "WinZapp"
         self.SetTitle(self.app_name)
 
+        # Detect no-UI background mode (started via --background flag by Windows
+        # autostart).  When True: no dialogs, no sounds, no visible window.
+        self.background_mode = "--background" in sys.argv
+
         #Initialize screen reader/sapi output
         self.speak_output = outputs.auto.Auto()
 
@@ -67,15 +71,22 @@ class MainWindow(wx.Frame):
         self.evolution_process = None
         self.ensure_evolution_running()
 
+        # First-run dialog: ask about autostart (normal mode only, once ever)
+        if not self.background_mode:
+            self._check_first_run()
+
         #Check Internet Connection
         self.offline_mode = not check_internet_connection()
-        #Play startup sound
-        self.startup_sound.play()
 
-        #Check for what window should be shown
-        if not self.connect.check_connection_status():
-            self.connect.show_connection_dial()
-            self.ws.sio.disconnect()
+        #Play startup sound (skipped in background mode)
+        if not self.background_mode:
+            self.startup_sound.play()
+
+        #Check for what window should be shown (skipped in background mode)
+        if not self.background_mode:
+            if not self.connect.check_connection_status():
+                self.connect.show_connection_dial()
+                self.ws.sio.disconnect()
         self.retrieve_token()
         #Initialize websocket
         self.ws = WebSocketClient(self, self.connect, self.token)
@@ -114,7 +125,10 @@ class MainWindow(wx.Frame):
         self.SetSizer(frame_sizer)
 
         self.create_accelerator_table()
-        self.Show()
+        # In background mode the window is intentionally hidden; it can be
+        # restored later by a second instance or a future tray-icon action.
+        if not self.background_mode:
+            self.Show()
         #Set offline chats for the first time
         self.set_chats()
         app.MainLoop()
@@ -130,12 +144,18 @@ class MainWindow(wx.Frame):
         module-install dialog.  The dialog runs `npm install` + `npm run
         db:generate` in the background.  If the user cancels or an error
         occurs, the application exits immediately.
+
+        In background mode the dialog is never shown; if modules are missing
+        the process exits silently (first run always happens in normal mode).
         """
         start_js     = resource_path("api", "start.js")
         node_modules = resource_path("api", "node_modules")
         # Nothing to do: no bundled api/, or modules already installed
         if not os.path.isfile(start_js) or os.path.isdir(node_modules):
             return
+        if self.background_mode:
+            # Modules must already be installed for background mode to work.
+            sys.exit(0)
         from module_install import ModuleInstallDialog
         dlg    = ModuleInstallDialog(self)
         result = dlg.ShowModal()
@@ -196,7 +216,12 @@ class MainWindow(wx.Frame):
 
     def ensure_evolution_running(self):
         """
-        Start the local Evolution API if it is not already listening, then
+        Start the local Evolution API if it is not already listening.
+
+        Normal mode   — shows a progress dialog while waiting (up to 3 min).
+        Background mode — polls silently; exits with code 1 on timeout.
+
+        Originally:
         wait up to 3 minutes for it to become ready via a progress dialog.
         On first launch the database initialisation and migrations can take
         60-90 s; subsequent starts are much faster.
@@ -207,6 +232,15 @@ class MainWindow(wx.Frame):
         self._evolution_log_path = None
         self._evolution_log_fh   = None
         self._start_evolution_background()
+
+        if self.background_mode:
+            # Silent wait — no dialog, no speech.  Timeout → exit code 1.
+            deadline = time.time() + 180
+            while time.time() < deadline:
+                if self._is_evolution_running():
+                    return
+                time.sleep(2)
+            sys.exit(1)
 
         from api_startup import ApiStartupDialog
         dlg    = ApiStartupDialog(self, self.evolution_port)
@@ -233,12 +267,38 @@ class MainWindow(wx.Frame):
     def create_accelerator_table(self):
         #Set IDs
         self.ID_ALT_1 = wx.NewIdRef()
+        self.ID_CTRL_COMMA = wx.NewIdRef()
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_ALT, ord('1'), self.ID_ALT_1)
+            (wx.ACCEL_ALT,  ord('1'),   self.ID_ALT_1),
+            (wx.ACCEL_CTRL, ord(','),   self.ID_CTRL_COMMA),
         ])
         self.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self.on_alt_1, id=self.ID_ALT_1)
+        self.Bind(wx.EVT_MENU, self.on_alt_1,       id=self.ID_ALT_1)
+        self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
+
+    def on_ctrl_comma(self, event):
+        self.open_settings()
+
+    def open_settings(self):
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def apply_language_changes(self):
+        """Refresh all visible translatable text after a language change."""
+        # Re-output with accessible_output2 so screen readers hear the new language
+        self.navigation_panel.refresh_labels()
+        self.conversations_panel.refresh_labels()
+        # Update frame title (keep any suffix that might be present during sync)
+        current_title = self.GetTitle()
+        if " - " in current_title:
+            suffix = current_title.split(" - ", 1)[1]
+            self.SetTitle(f"{self.i18n.t('app_name')} - {suffix}")
+        else:
+            self.SetTitle(self.i18n.t("app_name"))
+        self.main_panel.Layout()
 
     def on_alt_1(self, event):
         panels = self.content_panel.GetChildren()
@@ -252,6 +312,63 @@ class MainWindow(wx.Frame):
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
+
+    # ── First-run / autostart ─────────────────────────────────────────────────
+
+    def _check_first_run(self):
+        """
+        Show the autostart-offer dialog exactly once per installation.
+        The ``first_run`` flag in settings is cleared immediately to prevent
+        re-showing on a subsequent launch if the app crashes after this point.
+        """
+        if not self.settings.get("general", {}).get("first_run", True):
+            return
+        # Mark as done before showing the dialog
+        self.settings.setdefault("general", {})["first_run"] = False
+        self.save_settings()
+
+        result = wx.MessageBox(
+            self.i18n.t("autostart_ask_message"),
+            self.i18n.t("autostart_ask_title"),
+            wx.YES_NO | wx.ICON_QUESTION,
+        )
+        if result == wx.YES:
+            self._apply_autostart(enable=True)
+        else:
+            self.settings.setdefault("general", {})["autostart"] = False
+            self.save_settings()
+
+    def _apply_autostart(self, enable: bool):
+        """
+        Enable or disable the Windows Run registry entry for WinZapp.
+
+        On success with ``enable=True``: shows a confirmation dialog.
+        On failure: shows an error dialog and stores ``autostart=False``.
+        Called from ``_check_first_run()`` and from the Settings dialog.
+        """
+        from autostart import enable_autostart, disable_autostart
+        if enable:
+            try:
+                enable_autostart()
+                self.settings.setdefault("general", {})["autostart"] = True
+                self.save_settings()
+                wx.MessageBox(
+                    self.i18n.t("autostart_success_message"),
+                    self.i18n.t("autostart_success_title"),
+                    wx.OK | wx.ICON_INFORMATION,
+                )
+            except Exception as exc:
+                self.settings.setdefault("general", {})["autostart"] = False
+                self.save_settings()
+                wx.MessageBox(
+                    f"{self.i18n.t('autostart_error_message')}\n\n{exc}",
+                    self.i18n.t("error").format(app_name=self.app_name),
+                    wx.OK | wx.ICON_ERROR,
+                )
+        else:
+            disable_autostart()
+            self.settings.setdefault("general", {})["autostart"] = False
+            self.save_settings()
 
     def load_settings(self):
         settings_file = data_path("settings.json")
@@ -301,6 +418,10 @@ class MainWindow(wx.Frame):
             with open(data_path("token.tk"), "r") as token_file:
                 self.token = token_file.read().strip()
         except Exception as e:
+            if self.background_mode:
+                # No token means WhatsApp has never been paired — nothing to do
+                # in background mode; exit silently so Windows doesn't retry.
+                sys.exit(0)
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
@@ -315,15 +436,17 @@ class MainWindow(wx.Frame):
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
         if not self.offline_mode:
-            self.connected_sound.play()
+            if not self.background_mode:
+                self.connected_sound.play()
             if self.settings.get("status", {}).get("messages_set_completed"):
                 self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
                 self.sync_thread.start()
             else:
                 self.wait_messages_set()
         else:
-            self.offline_mode_sound.play()
-            self.output(self.i18n.t("offline_mode_enabled"))
+            if not self.background_mode:
+                self.offline_mode_sound.play()
+                self.output(self.i18n.t("offline_mode_enabled"))
         self.monitor_thread = threading.Thread(target=self.monitor_internet_connection, daemon=True)
         self.monitor_thread.start()
 
@@ -331,21 +454,25 @@ class MainWindow(wx.Frame):
         self.chats = self.get_remote_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_remote_contacts()
-        self.synchronizing_sound.play()
-        self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('synchronizing')}")
-        self.output(self.i18n.t("synchronization_started"), interrupt=True)
+        if not self.background_mode:
+            self.synchronizing_sound.play()
+            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('synchronizing')}")
+            self.output(self.i18n.t("synchronization_started"), interrupt=True)
         # Phase 1: sync all messages (no media download)
         self.sync_remote_chats()
         # Phase 2: download media for all chats
-        self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('downloading_media')}")
+        if not self.background_mode:
+            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('downloading_media')}")
         self.sync_media_for_all_chats()
-        self.sync_complete_sound.play()
-        self.SetTitle(f"{self.i18n.t('app_name')}")
-        self.output(self.i18n.t("sync_complete"))
+        if not self.background_mode:
+            self.sync_complete_sound.play()
+            self.SetTitle(f"{self.i18n.t('app_name')}")
+            self.output(self.i18n.t("sync_complete"))
         wx.CallAfter(self.preselect_conversations)
 
     def wait_messages_set(self):
-        self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('preparing_to_sync')}")
+        if not self.background_mode:
+            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('preparing_to_sync')}")
 
     def create_basic_files(self):
         data_dir = data_path("")
@@ -465,13 +592,87 @@ class MainWindow(wx.Frame):
     def set_chats(self):
         self.chat_names.clear()
         for chat in self.chats.values():
-            self.chat_names.append(self.find_name_through_messages(chat) or chat.get("pushName", "") or self.find_jid_through_messages(chat) or format_number(chat.get("remoteJid", "")))
+            self.chat_names.append(
+                self._resolve_contact_name(chat)
+                or self.find_name_through_messages(chat)
+                or chat.get("pushName", "")
+                or self.find_jid_through_messages(chat)
+                or format_number(chat.get("remoteJid", ""))
+            )
         #Save copy of chats and chat_names
         self.conversations_panel.chats_list = list(self.chats.values())
         self.conversations_panel.chat_names = self.chat_names
         #Checks if window is still open
         if self.IsShown():
             self.add_chats_to_ui()
+
+    def _find_alt_jid_from_messages(self, chat):
+        """
+        When a chat is addressed as @lid, find the corresponding phone-number
+        JID by scanning message keys for the bridge fields that Baileys/
+        Evolution API sets when addressingMode == "lid":
+          - remoteJidAlt  (primary field, e.g. "5511987654321@s.whatsapp.net")
+          - senderPn      (fallback field used in some Evolution versions)
+        Returns the alt JID string, or None if not found.
+        """
+        for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
+            key = msg.get("key", {})
+            if not key.get("fromMe") and key.get("addressingMode") == "lid":
+                alt = key.get("remoteJidAlt") or key.get("senderPn", "")
+                if alt:
+                    return alt
+        return None
+
+    def _resolve_contact_name(self, chat):
+        """
+        Return the address-book contact name (e.g. "mãe") for a private chat,
+        or None for groups or when no saved contact name is available.
+
+        WhatsApp uses two JID formats:
+          - @s.whatsapp.net  traditional phone-number-based identifier
+          - @lid             opaque Linked Device ID (newer accounts)
+
+        The contacts dict is indexed by whichever JID format Evolution API
+        stored for each contact.  When a chat's remoteJid is @lid but the
+        contact is stored under the phone-number JID (or vice-versa), the
+        direct lookup fails.  In that case we scan the chat's message keys
+        for the remoteJidAlt / senderPn bridge field that Baileys sets when
+        addressingMode == "lid", giving us the alternate JID to try.
+
+        Field priority within a contact object (Baileys / Evolution API):
+          name > fullName > verifiedName
+          (pushName is the WhatsApp profile name, NOT the address-book name.)
+        """
+        remoteJid = chat.get("remoteJid", "")
+        if not remoteJid or remoteJid.endswith("@g.us"):
+            return None  # groups don't have address-book entries
+
+        def _name_from_contact(c):
+            # Evolution API v2 stores the address-book name in Contact.pushName
+            # (derived from Baileys contact.name || contact.verifiedName).
+            # Prefer explicit name fields; fall back to pushName of the contact
+            # object (NOT the chat/message pushName, which is the WA profile name).
+            return (c.get("name") or c.get("fullName") or
+                    c.get("verifiedName") or c.get("pushName") or None)
+
+        # 1. Direct lookup by chat's own remoteJid
+        contact = self.contacts.get(remoteJid)
+        if contact:
+            n = _name_from_contact(contact)
+            if n:
+                return n
+
+        # 2. @lid chat — bridge to phone-number JID via message keys
+        if remoteJid.endswith("@lid"):
+            alt_jid = self._find_alt_jid_from_messages(chat)
+            if alt_jid:
+                contact = self.contacts.get(alt_jid)
+                if contact:
+                    n = _name_from_contact(contact)
+                    if n:
+                        return n
+
+        return None
 
     def find_name_through_messages(self, chat):
         #If it's a chat group, ignore
@@ -489,7 +690,6 @@ class MainWindow(wx.Frame):
 
     def find_jid_through_messages(self, chat):
         for message in chat["messages"].get("messages", {}).get("records", []):
-            print(message.get("key", {}))
             #Find a message that is not from you
             if not message.get("key", {}).get("fromMe"):
                 #If addressingMode is lid, return remoteJidAlt, if not return remoteJid
@@ -723,6 +923,19 @@ class MainWindow(wx.Frame):
 
 
 if __name__ == "__main__":
+    from autostart import acquire_single_instance_mutex, activate_existing_window
+
+    background = "--background" in sys.argv
+    first_instance = acquire_single_instance_mutex()
+
+    if not first_instance:
+        if not background:
+            # A normal launch while WinZapp is already running in the background:
+            # bring the existing window to the foreground and exit.
+            activate_existing_window()
+        # If --background and already running: nothing to do — exit silently.
+        sys.exit(0)
+
     app = wx.App()
     frame = MainWindow()
 

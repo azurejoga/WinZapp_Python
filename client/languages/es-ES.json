@@ -80,5 +80,22 @@
     "module_install_text": "Instalando los módulos necesarios para el funcionamiento del programa. Por favor, espera...",
     "module_install_success": "Los módulos de WinZapp se han instalado correctamente.",
     "module_install_error": "Se produjo un error al instalar los módulos necesarios. El programa se cerrará.",
-    "cancel": "&Cancelar"
+    "cancel": "&Cancelar",
+    "settings": "Configuración",
+    "settings_shortcut": "ctrl+coma",
+    "settings_title": "WinZapp | Configuración",
+    "tab_general": "General",
+    "tab_connection": "Conexión",
+    "language_label": "Idioma:",
+    "evolution_port_label": "Puerto de la API (Evolution):",
+    "apply": "&Aplicar",
+    "invalid_port": "El puerto debe ser un número entero entre 1024 y 65535.",
+    "autostart_label": "Iniciar WinZapp en segundo plano al entrar en Windows",
+    "autostart_ask_title": "Iniciar WinZapp con Windows",
+    "autostart_ask_message": "¿Deseas permitir que WinZapp se inicie automáticamente en segundo plano al entrar en Windows?",
+    "autostart_success_title": "Éxito",
+    "autostart_success_message": "WinZapp ahora se iniciará en segundo plano con Windows.",
+    "autostart_error_message": "No se pudo agregar la entrada de inicio automático. Error:"
 }
+
+
