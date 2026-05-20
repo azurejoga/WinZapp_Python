@@ -2,7 +2,12 @@ import base64 as _b64
 import os
 import tempfile
 import threading
+import time
+import uuid
 import wx
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
 import sound_lib.stream as sl_stream
 from sound_lib.effects import Tempo
 from accessible import (
@@ -10,9 +15,13 @@ from accessible import (
     AccessibleRecordVoiceMessage,
     AccessibleAudioSlider,
     AccessibleSaveAs,
+    AccessibleDiscardVoiceMessage,
+    AccessiblePauseResumeRecording,
+    AccessibleSendVoiceMessage,
 )
 from utils import format_number, decrypt_bytes
 from app_paths import data_path
+from message_queue import PendingMessage
 from datetime import datetime
 
 
@@ -39,6 +48,14 @@ class ConversationsPanel(wx.Panel):
         self._audio_tempo_map = {1.0: 0, 1.5: 50, 2.0: 100}
         self._audio_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_audio_timer, self._audio_timer)
+
+        # ── Voice recording state ───────────────────────────────────────────
+        self._is_recording        = False
+        self._recording_paused    = False
+        self._recording_frames: list = []   # list of numpy arrays from callback
+        self._recording_stream    = None    # sd.InputStream
+        self._recording_samplerate = 16000
+        self._recording_channels   = 1
 
         # ── Media download progress ─────────────────────────────────────────
         # msg_id -> float 0.0-1.0  (absent = not tracked / already complete)
@@ -158,6 +175,7 @@ class ConversationsPanel(wx.Panel):
         self.send_message_btn = wx.Button(
             self.conversation_panel, label=i18n.t("send_message")
         )
+        self.send_message_btn.Bind(wx.EVT_BUTTON, self.on_send_message)
         conv_sizer.Add(self.send_message_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self.send_message_btn.Hide()
 
@@ -169,6 +187,35 @@ class ConversationsPanel(wx.Panel):
         )
         self.record_voice_message_btn.Bind(wx.EVT_BUTTON, self.on_record_voice_message)
         conv_sizer.Add(self.record_voice_message_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        # ── Voice recording panel (hidden until recording starts) ───────────
+        self._voice_panel = wx.Panel(self.conversation_panel)
+        voice_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self._discard_voice_btn = wx.Button(
+            self._voice_panel, label=i18n.t("discard_voice_message")
+        )
+        self._discard_voice_btn.SetAccessible(AccessibleDiscardVoiceMessage())
+        self._discard_voice_btn.Bind(wx.EVT_BUTTON, self._discard_voice_message)
+        voice_sizer.Add(self._discard_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        self._pause_resume_btn = wx.Button(
+            self._voice_panel, label=i18n.t("pause_recording")
+        )
+        self._pause_resume_btn.SetAccessible(AccessiblePauseResumeRecording())
+        self._pause_resume_btn.Bind(wx.EVT_BUTTON, self._toggle_pause_recording)
+        voice_sizer.Add(self._pause_resume_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        self._send_voice_btn = wx.Button(
+            self._voice_panel, label=i18n.t("send_voice_message")
+        )
+        self._send_voice_btn.SetAccessible(AccessibleSendVoiceMessage())
+        self._send_voice_btn.Bind(wx.EVT_BUTTON, self._send_voice_message)
+        voice_sizer.Add(self._send_voice_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        self._voice_panel.SetSizer(voice_sizer)
+        self._voice_panel.Hide()
+        conv_sizer.Add(self._voice_panel, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self.conversation_panel.SetSizer(conv_sizer)
         self.conversation_panel.Hide()
@@ -187,21 +234,27 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self.on_ctrl_f, id=self.ID_CTRL_F)
 
     def create_accel_conversation(self):
-        self.ID_CTRL_R     = wx.NewIdRef()
-        self.ID_ESC        = wx.NewIdRef()
-        self.CTRL_W        = wx.NewIdRef()
+        self.ID_CTRL_R       = wx.NewIdRef()
+        self.ID_ESC          = wx.NewIdRef()
+        self.CTRL_W          = wx.NewIdRef()
         self.ID_CTRL_SHIFT_S = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_D = wx.NewIdRef()
+        self.ID_CTRL_SHIFT_P = wx.NewIdRef()
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,                  ord("R"), self.ID_CTRL_R),
             (wx.ACCEL_NORMAL,     wx.WXK_ESCAPE,       self.ID_ESC),
             (wx.ACCEL_CTRL,                  ord("W"), self.CTRL_W),
             (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("S"), self.ID_CTRL_SHIFT_S),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("D"), self.ID_CTRL_SHIFT_D),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("P"), self.ID_CTRL_SHIFT_P),
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self.on_record_voice_message, id=self.ID_CTRL_R)
-        self.Bind(wx.EVT_MENU, self.close_conversation,      id=self.ID_ESC)
-        self.Bind(wx.EVT_MENU, self.close_conversation,      id=self.CTRL_W)
-        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_s,        id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self.on_record_voice_message,  id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self.close_conversation,       id=self.ID_ESC)
+        self.Bind(wx.EVT_MENU, self.close_conversation,       id=self.CTRL_W)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_s,         id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._discard_voice_message,   id=self.ID_CTRL_SHIFT_D)
+        self.Bind(wx.EVT_MENU, self._toggle_pause_recording,  id=self.ID_CTRL_SHIFT_P)
 
     # ── Conversations list events ───────────────────────────────────────────
 
@@ -264,6 +317,9 @@ class ConversationsPanel(wx.Panel):
         self.search_field.SetFocus()
 
     def on_change_message_field(self, event):
+        # Don't touch button visibility while the voice panel is showing.
+        if self._is_recording:
+            return
         msg = self.message_field.GetValue()
         if msg.strip():
             self.send_message_btn.Show()
@@ -302,11 +358,235 @@ class ConversationsPanel(wx.Panel):
 
         self.send_message_btn.SetLabel(i18n.t("send_message"))
         self.record_voice_message_btn.SetLabel(i18n.t("record_voice_message"))
+        self._discard_voice_btn.SetLabel(i18n.t("discard_voice_message"))
+        self._send_voice_btn.SetLabel(i18n.t("send_voice_message"))
+        if self._is_recording and self._recording_paused:
+            self._pause_resume_btn.SetLabel(i18n.t("resume_recording"))
+        else:
+            self._pause_resume_btn.SetLabel(i18n.t("pause_recording"))
 
     def on_record_voice_message(self, event):
-        pass
+        """
+        Ctrl+R / button handler.
+        • When NOT recording → start a new voice recording.
+        • When recording is active → send the recorded audio (same shortcut).
+        """
+        if self._is_recording:
+            self._send_voice_message(event)
+        else:
+            self._start_voice_recording()
+
+    # ── Text message sending ─────────────────────────────────────────────────
+
+    def on_send_message(self, event):
+        """Send button handler: enqueue message, add to UI immediately as pending."""
+        if self.conversation is None:
+            return
+        text = self.message_field.GetValue().strip()
+        if not text:
+            return
+        remote_jid = self.conversation.get("remoteJid", "")
+        if not remote_jid:
+            return
+
+        # Build a virtual message dict that renders identically to real messages.
+        local_id = str(uuid.uuid4())
+        virtual_msg = {
+            "_local_pending": True,
+            "_local_id":      local_id,
+            "key": {
+                "id":       local_id,
+                "fromMe":   True,
+                "remoteJid": remote_jid,
+            },
+            "messageType":      "conversation",
+            "message":          {"conversation": text},
+            "messageTimestamp": int(time.time()),
+            "pushName":         "",
+        }
+
+        # Add to sorted list and UI list immediately.
+        self._sorted_messages.append(virtual_msg)
+        self.messages_list.Append((self._render_message_line(virtual_msg),))
+        # Scroll to the new item.
+        last = self.messages_list.GetItemCount() - 1
+        if last >= 0:
+            self.messages_list.EnsureVisible(last)
+
+        # Clear the text field (this also hides send btn, shows record btn).
+        self.message_field.SetValue("")
+
+        # Enqueue for background sending (with retry on failure).
+        pm = PendingMessage(local_id, remote_jid, text=text)
+        self.main_window.message_queue.enqueue(pm)
+
+    def _mark_message_sent(self, local_id: str):
+        """
+        Called on the main thread when a queued message is successfully delivered.
+        Clears the _local_pending flag and refreshes the list item.
+        """
+        for i, msg in enumerate(self._sorted_messages):
+            if msg.get("_local_id") == local_id:
+                msg["_local_pending"] = False
+                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                break
+
+    # ── Voice recording ──────────────────────────────────────────────────────
+
+    def _start_voice_recording(self):
+        """Start capturing audio from the default input device."""
+        if self.conversation is None:
+            return
+
+        self._recording_frames = []
+        self._recording_paused = False
+
+        def _callback(indata, frames, t, status):
+            # Runs on the sounddevice callback thread (not the main thread).
+            # list.append is GIL-safe; skip frames while paused.
+            if not self._recording_paused:
+                self._recording_frames.append(indata.copy())
+
+        try:
+            self._recording_stream = sd.InputStream(
+                samplerate=self._recording_samplerate,
+                channels=self._recording_channels,
+                dtype="float32",
+                callback=_callback,
+            )
+            self._recording_stream.start()
+        except Exception:
+            self._recording_stream = None
+            return
+
+        self._is_recording = True
+
+        # UI: play sound, swap buttons, focus Discard.
+        self.main_window.voicemsg_startrecording_sound.play()
+        self.send_message_btn.Hide()
+        self.record_voice_message_btn.Hide()
+        self._pause_resume_btn.SetLabel(
+            self.main_window.i18n.t("pause_recording")
+        )
+        self._voice_panel.Show()
+        self.conversation_panel.Layout()
+        self._discard_voice_btn.SetFocus()
+
+    def _stop_recording_stream(self):
+        """Stop and close the active InputStream (safe to call when None)."""
+        if self._recording_stream is not None:
+            try:
+                self._recording_stream.stop()
+                self._recording_stream.close()
+            except Exception:
+                pass
+            self._recording_stream = None
+
+    def _hide_voice_panel(self):
+        """Hide the voice panel and restore the record / send button visibility."""
+        self._voice_panel.Hide()
+        # Show record btn only when the message field is empty.
+        if self.message_field.GetValue().strip():
+            self.send_message_btn.Show()
+        else:
+            self.record_voice_message_btn.Show()
+        self.conversation_panel.Layout()
+
+    def _discard_voice_message(self, event):
+        """Discard the current recording without sending."""
+        if not self._is_recording:
+            return
+        self.main_window.voicemsg_discard_sound.play()
+        self._stop_recording_stream()
+        self._is_recording     = False
+        self._recording_paused = False
+        self._recording_frames = []
+        self._hide_voice_panel()
+        self.message_field.SetFocus()
+
+    def _toggle_pause_recording(self, event):
+        """Pause or resume the ongoing recording."""
+        if not self._is_recording:
+            return
+        self.main_window.voicemsg_pauserecording_sound.play()
+        self._recording_paused = not self._recording_paused
+        label_key = "resume_recording" if self._recording_paused else "pause_recording"
+        self._pause_resume_btn.SetLabel(self.main_window.i18n.t(label_key))
+
+    def _send_voice_message(self, event):
+        """Stop recording and enqueue the audio for delivery."""
+        if not self._is_recording:
+            return
+        self.main_window.voicemsg_send_sound.play()
+        self._stop_recording_stream()
+        self._is_recording     = False
+        self._recording_paused = False
+
+        frames = self._recording_frames
+        self._recording_frames = []
+
+        if not frames:
+            self._hide_voice_panel()
+            self.message_field.SetFocus()
+            return
+
+        # Save recording to a temporary WAV file (deleted after successful upload).
+        try:
+            audio_data = np.concatenate(frames, axis=0)
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.close()
+            sf.write(tmp.name, audio_data, self._recording_samplerate)
+            wav_path = tmp.name
+        except Exception:
+            self._hide_voice_panel()
+            self.message_field.SetFocus()
+            return
+
+        remote_jid   = self.conversation.get("remoteJid", "")
+        local_id     = str(uuid.uuid4())
+        duration_sec = int(len(audio_data) / self._recording_samplerate)
+
+        # Virtual message shown immediately as pending in the messages list.
+        virtual_msg = {
+            "_local_pending": True,
+            "_local_id":      local_id,
+            "key": {
+                "id":        local_id,
+                "fromMe":    True,
+                "remoteJid": remote_jid,
+            },
+            "messageType": "audioMessage",
+            "message": {
+                "audioMessage": {
+                    "seconds": duration_sec,
+                    "ptt":     True,
+                }
+            },
+            "messageTimestamp": int(time.time()),
+            "pushName":         "",
+        }
+        self._sorted_messages.append(virtual_msg)
+        self.messages_list.Append((self._render_message_line(virtual_msg),))
+        last = self.messages_list.GetItemCount() - 1
+        if last >= 0:
+            self.messages_list.EnsureVisible(last)
+
+        # Enqueue for background upload.
+        pm = PendingMessage(local_id, remote_jid, audio_path=wav_path)
+        self.main_window.message_queue.enqueue(pm)
+
+        self._hide_voice_panel()
+        self.message_field.SetFocus()
 
     def close_conversation(self, event):
+        # Discard any active recording cleanly before leaving the conversation.
+        if self._is_recording:
+            self._stop_recording_stream()
+            self._is_recording     = False
+            self._recording_paused = False
+            self._recording_frames = []
+            self._voice_panel.Hide()
+            self.record_voice_message_btn.Show()
         self._stop_audio()
         self._hide_audio_controls()
         self._hide_all_media_controls()
@@ -970,7 +1250,10 @@ class ConversationsPanel(wx.Panel):
         )
 
     def _map_status(self, msg) -> str:
-        i18n    = self.main_window.i18n
+        i18n = self.main_window.i18n
+        # Locally-queued messages have their own pending status.
+        if msg.get("_local_pending"):
+            return i18n.t("status_pending")
         updates = msg.get("MessageUpdate")
         if isinstance(updates, list) and updates:
             statuses = []

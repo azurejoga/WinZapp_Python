@@ -28,6 +28,27 @@ class AccessibleSaveAs(wx.Accessible):
         return (wx.ACC_OK, "Ctrl+Shift+S")
 
 
+class AccessibleDiscardVoiceMessage(wx.Accessible):
+    """Reports Ctrl+Shift+D as the keyboard shortcut for the Discard button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+D")
+
+
+class AccessiblePauseResumeRecording(wx.Accessible):
+    """Reports Ctrl+Shift+P as the keyboard shortcut for the Pause/Resume button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+Shift+P")
+
+
+class AccessibleSendVoiceMessage(wx.Accessible):
+    """Reports Ctrl+R as the keyboard shortcut for the Send Voice Message button."""
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "Ctrl+R")
+
+
 class AccessibleAudioSlider(wx.Accessible):
     def __init__(self, conversations_panel):
         super().__init__()

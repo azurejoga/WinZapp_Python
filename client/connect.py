@@ -11,6 +11,7 @@ from traceback import format_exc
 import json
 import base64
 from io import BytesIO
+from countries import COUNTRIES
 
 # Events forwarded to the WinZapp client via Socket.IO
 _WEBSOCKET_EVENTS = [
@@ -29,6 +30,10 @@ class Connect:
         self.i18n = I18n(self.main_window)
         self.i18n.get_language()
         self.connection_mode = "phone"  # Default mode: qrcode or phone
+
+        # Phone-field state (formatter + country selector)
+        self._current_dial_code: str = "55"   # Brazil default
+        self._phone_updating:    bool = False  # reentrancy guard for EVT_TEXT
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -135,19 +140,47 @@ class Connect:
 
         # Phone Number Panel
         self.phone_panel = wx.Panel(self.connection_dial)
-        self.phone_number_label = wx.StaticText(self.phone_panel, label=self.i18n.t("enter_phone"))
-        self.phone_field = wx.TextCtrl(self.phone_panel, style=wx.TE_CENTER | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP)
+
+        # ── Country selector ──────────────────────────────────────────────
+        self.country_label_ctrl = wx.StaticText(
+            self.phone_panel, label=self.i18n.t("country_label")
+        )
+        self.country_combo = wx.ComboBox(
+            self.phone_panel,
+            style=wx.CB_READONLY,
+            choices=[c[0] for c in COUNTRIES],
+        )
+        self.country_combo.SetSelection(0)   # Brazil
+        self.country_combo.Bind(wx.EVT_COMBOBOX, self.on_country_changed)
+
+        # ── Phone number field ────────────────────────────────────────────
+        self.phone_number_label = wx.StaticText(
+            self.phone_panel, label=self.i18n.t("enter_phone")
+        )
+        self.phone_field = wx.TextCtrl(
+            self.phone_panel,
+            value=f"+{self._current_dial_code} ",
+            style=wx.TE_CENTER | wx.TE_PROCESS_ENTER | wx.TE_DONTWRAP,
+        )
+        self.phone_field.Bind(wx.EVT_CHAR,       self.on_phone_char)
+        self.phone_field.Bind(wx.EVT_TEXT,       self.on_phone_text_changed)
+        self.phone_field.Bind(wx.EVT_TEXT_ENTER, self.on_continue)
+        self.phone_field.SetInsertionPointEnd()
+
         self.continue_btn = wx.Button(self.phone_panel, label=self.i18n.t("continue"))
         self.continue_btn.Bind(wx.EVT_BUTTON, self.on_continue)
-        self.phone_field.Bind(wx.EVT_TEXT_ENTER, self.on_continue)
-        self.switch_to_qrcode_btn = wx.Button(self.phone_panel, label=self.i18n.t("connect_with_qrcode"))
+        self.switch_to_qrcode_btn = wx.Button(
+            self.phone_panel, label=self.i18n.t("connect_with_qrcode")
+        )
         self.switch_to_qrcode_btn.Bind(wx.EVT_BUTTON, self.on_switch_to_qrcode)
 
         phone_sizer = wx.BoxSizer(wx.VERTICAL)
-        phone_sizer.Add(self.phone_number_label, 0, wx.ALL | wx.CENTER, 10)
-        phone_sizer.Add(self.phone_field, 0, wx.ALL | wx.EXPAND, 10)
-        phone_sizer.Add(self.continue_btn, 0, wx.ALL | wx.CENTER, 10)
-        phone_sizer.Add(self.switch_to_qrcode_btn, 0, wx.ALL | wx.CENTER, 10)
+        phone_sizer.Add(self.country_label_ctrl,  0, wx.LEFT | wx.TOP,        10)
+        phone_sizer.Add(self.country_combo,        0, wx.ALL | wx.EXPAND,     10)
+        phone_sizer.Add(self.phone_number_label,   0, wx.LEFT | wx.TOP,       10)
+        phone_sizer.Add(self.phone_field,          0, wx.ALL | wx.EXPAND,     10)
+        phone_sizer.Add(self.continue_btn,         0, wx.ALL | wx.CENTER,     10)
+        phone_sizer.Add(self.switch_to_qrcode_btn, 0, wx.ALL | wx.CENTER,     10)
         self.phone_panel.SetSizer(phone_sizer)
 
         # Quit button
@@ -178,6 +211,7 @@ class Connect:
         self.phone_panel.Show()
         self.connection_dial.Layout()
         self.phone_field.SetFocus()
+        self.phone_field.SetInsertionPointEnd()
 
 
     def on_switch_to_qrcode(self, event):
@@ -283,13 +317,25 @@ class Connect:
     def on_continue(self, event):
         """Phone-number pairing flow."""
         try:
-            self.phone_number = self.phone_field.GetValue()
+            # Always send raw digits to the API (strip formatting chars)
+            self.phone_number = "".join(
+                c for c in self.phone_field.GetValue() if c.isdigit()
+            )
+            if not self.phone_number:
+                return
             #Ensure messages_set_completed is set to False
             self.main_window.settings["status"]["messages_set_completed"] = False
             self.main_window.save_settings()
+            # Normalise stored number to digits-only for comparison
+            stored_raw = "".join(
+                c for c in self.main_window.settings.get("privateinfo", {}).get(
+                    "WA_phone_number", ""
+                )
+                if c.isdigit()
+            )
             #Check if the user has already tried to connect with this number
             if (
-                self.main_window.settings.get("privateinfo", {}).get("WA_phone_number", "") == self.phone_number
+                stored_raw == self.phone_number
                 and self.main_window.settings.get("privateinfo", {}).get("WA_token", "")
             ):
                 #Assume token available
@@ -331,6 +377,152 @@ class Connect:
         except Exception:
             self.main_window.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('connection_failed').format(app_name=self.main_window.app_name)} {format_exc()}", self.i18n.t('connection_error').format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR)
+
+    # ── Phone formatter ────────────────────────────────────────────────────
+
+    def on_country_changed(self, event):
+        """Update the dial code and reformat the phone field."""
+        idx = self.country_combo.GetSelection()
+        if idx == wx.NOT_FOUND:
+            return
+        _, new_code = COUNTRIES[idx]
+
+        # Preserve the local digits already typed (strip old country code prefix)
+        text       = self.phone_field.GetValue()
+        all_digits = "".join(c for c in text if c.isdigit())
+        old_cc     = self._current_dial_code
+        local_digits = (
+            all_digits[len(old_cc):]
+            if all_digits.startswith(old_cc)
+            else all_digits
+        )
+
+        self._current_dial_code = new_code
+
+        self._phone_updating = True
+        try:
+            self.phone_field.ChangeValue(
+                self._format_phone_display(new_code + local_digits)
+            )
+            self.phone_field.SetInsertionPointEnd()
+        finally:
+            self._phone_updating = False
+
+    def on_phone_char(self, event):
+        """
+        Filter individual keystrokes in the phone field.
+
+        Digits (0-9 and numpad), navigation keys and Ctrl+key combinations
+        pass through.  Everything else (letters, punctuation, @, _, …) is
+        consumed and the screen reader announces "Caractere inválido".
+        """
+        key = event.GetKeyCode()
+
+        # Navigation / editing keys always pass through
+        _NAV = {
+            wx.WXK_BACK, wx.WXK_DELETE,
+            wx.WXK_LEFT, wx.WXK_RIGHT, wx.WXK_HOME, wx.WXK_END,
+            wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER,
+            wx.WXK_TAB, wx.WXK_ESCAPE,
+        }
+        if key in _NAV:
+            event.Skip()
+            return
+
+        # Any Ctrl+key combo (clipboard shortcuts, select-all, …)
+        if event.ControlDown():
+            event.Skip()
+            return
+
+        # Main keyboard digits
+        if ord("0") <= key <= ord("9"):
+            event.Skip()
+            return
+
+        # Numpad digits
+        if wx.WXK_NUMPAD0 <= key <= wx.WXK_NUMPAD9:
+            event.Skip()
+            return
+
+        # Anything else → reject and announce
+        self.main_window.speak_output.output(
+            self.main_window.i18n.t("invalid_char")
+        )
+        # Do NOT call event.Skip() — the character is swallowed
+
+    def on_phone_text_changed(self, event):
+        """
+        Reformat the phone field after every text change (including paste).
+
+        If the new text contains characters that are not digits and not our
+        formatting symbols (+, -, space), the screen reader announces
+        "Caractere inválido" and those characters are silently stripped.
+        """
+        if self._phone_updating:
+            return
+        self._phone_updating = True
+        try:
+            text = self.phone_field.GetValue()
+
+            # Detect truly invalid chars coming from paste
+            _fmt = set("+- ")
+            if any(c not in _fmt and not c.isdigit() for c in text):
+                self.main_window.speak_output.output(
+                    self.main_window.i18n.t("invalid_char")
+                )
+
+            digits    = "".join(c for c in text if c.isdigit())
+            formatted = self._format_phone_display(digits)
+            if formatted != text:
+                self.phone_field.ChangeValue(formatted)
+                self.phone_field.SetInsertionPointEnd()
+        finally:
+            self._phone_updating = False
+
+    def _format_phone_display(self, digits: str) -> str:
+        """
+        Convert a raw digit string (including country code) to the display
+        format used in the phone field.
+
+        Examples (CC = 55):
+          "5551987560609"  →  "+55 51 98756-0609"   (9-digit mobile)
+          "5551875606090"  →  "+55 51 8756-0609"    (8-digit landline)
+
+        Rules:
+          • Always begin with +CC.
+          • Next 2 digits = area code (DDD), separated by a space.
+          • Remaining digits: last 4 always appear after a hyphen once there
+            are 7+ digits in the body; 9-digit body uses 5-4 split.
+          • While the user is still typing (< 7 body digits) no hyphen is
+            shown so the field doesn't jump unexpectedly.
+        """
+        cc = self._current_dial_code
+        local = digits[len(cc):] if digits.startswith(cc) else digits
+
+        result = f"+{cc}"
+        if not local:
+            return result
+
+        # Area code: first 2 digits
+        area = local[:2]
+        rest = local[2:]
+        result += f" {area}"
+        if not rest:
+            return result
+
+        # Phone body
+        if len(rest) < 7:
+            # Still typing — no hyphen yet
+            result += f" {rest}"
+        elif len(rest) == 9:
+            # Brazilian 9-digit mobile: 5-4 split
+            result += f" {rest[:5]}-{rest[5:]}"
+        else:
+            # Generic: last 4 after hyphen
+            split   = len(rest) - 4
+            result += f" {rest[:split]}-{rest[split:]}"
+
+        return result
 
     def generate_random_token(self):
         return os.urandom(16).hex()

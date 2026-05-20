@@ -1,7 +1,9 @@
 {
     "app_name": "WinZapp",
     "connect_phone": "Connect to {app_name}",
-    "enter_phone": "&Enter your phone number + country code (digits only)",
+    "enter_phone": "&Enter your phone number",
+    "country_label": "Select a country:",
+    "invalid_char": "Invalid character",
     "continue": "&Continue",
     "connection_error": "Connection error",
     "connection_failed": "Could not connect to {app_name}. The error message displayed was:",
@@ -105,7 +107,11 @@
     "open": "Open",
     "open_image": "Open image",
     "save_as": "Save as...",
-    "downloading_progress": "downloading, {pct}% done"
+    "downloading_progress": "downloading, {pct}% done",
+    "discard_voice_message": "Discard voice message",
+    "pause_recording": "Pause recording",
+    "resume_recording": "Resume recording",
+    "send_voice_message": "Send voice message"
 }
 
 

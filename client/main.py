@@ -15,6 +15,7 @@ from i18n import I18n
 from websocket_client import WebSocketClient
 from utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
 from app_paths import resource_path, data_path
+from message_queue import MessageQueue
 import wx
 from connect import Connect
 from navigation import NavigationPanel
@@ -92,6 +93,9 @@ class MainWindow(wx.Frame):
         self.ws = WebSocketClient(self, self.connect, self.token)
 
         self.prepare_sync()
+        # Initialise outgoing-message queue (must exist before init_UI so the
+        # ConversationsPanel can call self.main_window.message_queue.enqueue).
+        self.message_queue = MessageQueue(self)
         #Connect WebSocket if not Offline
         if not self.offline_mode:
             self.connect_websocket()
@@ -416,6 +420,11 @@ class MainWindow(wx.Frame):
         self.synchronizing_sound = Sound(self.sound_system, "synchronizing.ogg")
         self.sync_complete_sound = Sound(self.sound_system, "sync_complete.ogg")
         self.offline_mode_sound = Sound(self.sound_system, "offline_mode.ogg")
+        # Voice recording sounds
+        self.voicemsg_startrecording_sound  = Sound(self.sound_system, "voicemsg_startrecording.ogg")
+        self.voicemsg_pauserecording_sound  = Sound(self.sound_system, "voicemsg_pauserecording.ogg")
+        self.voicemsg_discard_sound         = Sound(self.sound_system, "voicemsg_discard.ogg")
+        self.voicemsg_send_sound            = Sound(self.sound_system, "voicemsg_send.ogg")
 
     def retrieve_token(self):
         try:
@@ -804,7 +813,7 @@ class MainWindow(wx.Frame):
             f.write(encrypted)
 
     def send_text_message(self, remote_jid, text):
-        """Send a plain-text message via the Evolution API (used for button replies)."""
+        """Send a plain-text message via the Evolution API."""
         url = f"{self.evolution_server}:{self.evolution_port}/message/sendText/{self.token}"
         payload = {"number": remote_jid, "text": text}
         headers = {"apikey": self.token, "Content-Type": "application/json"}
@@ -813,6 +822,49 @@ class MainWindow(wx.Frame):
             return response.status_code in (200, 201)
         except Exception:
             return False
+
+    def send_audio_message(self, remote_jid: str, wav_path: str) -> bool:
+        """
+        Base64-encode a WAV file and send it as an audio media message via the
+        Evolution API.  Returns True on HTTP 200/201, False on any failure.
+        """
+        try:
+            with open(wav_path, "rb") as fh:
+                audio_b64 = base64.b64encode(fh.read()).decode("utf-8")
+        except Exception:
+            return False
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/message/sendMedia/{self.token}"
+        )
+        payload = {
+            "number":    remote_jid,
+            "mediatype": "audio",
+            "media":     audio_b64,
+            "mimetype":  "audio/wav",
+            "fileName":  "voice_message.wav",
+        }
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            return response.status_code in (200, 201)
+        except Exception:
+            return False
+
+    def _on_message_sent(self, local_id: str, audio_path: str = None):
+        """
+        Called on the main thread after a queued message is successfully sent.
+        Updates the UI status label and cleans up any temporary audio file.
+        """
+        # Update the pending virtual message in the conversations panel.
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel._mark_message_sent(local_id)
+        # Clean up the voice recording temp file now that it has been uploaded.
+        if audio_path and os.path.isfile(audio_path):
+            try:
+                os.unlink(audio_path)
+            except Exception:
+                pass
 
     def handle_audio_message(self, msg):
         #First, check if the audio is already downloaded
@@ -910,6 +962,9 @@ class MainWindow(wx.Frame):
         self.output(self.i18n.t("connection_restored"), interrupt=True)
         self.SetTitle(f"{self.i18n.t('app_name')}")
         self.connected_sound.play()
+        # Immediately retry any messages that accumulated while offline.
+        if hasattr(self, "message_queue"):
+            self.message_queue.flush()
         self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
         self.sync_thread.start()
         self.connect_websocket()
