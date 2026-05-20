@@ -10,16 +10,16 @@ import base64
 import socketio
 import atexit
 from accessible_output2 import outputs
-from sound_system import SoundSystem, Sound
-from i18n import I18n
-from websocket_client import WebSocketClient
-from utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
+from core.sound_system import SoundSystem, Sound
+from core.i18n import I18n
+from core.websocket_client import WebSocketClient
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
 from app_paths import resource_path, data_path
-from message_queue import MessageQueue
+from core.message_queue import MessageQueue
 import wx
-from connect import Connect
-from navigation import NavigationPanel
-from conversations import ConversationsPanel
+from ui.dialogs.connect import Connect
+from ui.navigation import NavigationPanel
+from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
 import json
 from traceback import format_exc, format_exception
 import pyperclip
@@ -43,6 +43,12 @@ class MainWindow(wx.Frame):
         self.load_sounds()
         self.settings = {}
         self.load_settings()
+
+        # ── Language selection on first launch ─────────────────────────────────
+        # Show before everything else so the user can pick their language
+        # before any module installation or connection dialogs appear.
+        if not self.background_mode:
+            self._ensure_language_selected()
 
         #Initialize helper classes
         self.connect = Connect(self)
@@ -111,10 +117,15 @@ class MainWindow(wx.Frame):
         self.navigation_panel = NavigationPanel(self, self.main_panel)
         self.content_panel = wx.Panel(self.main_panel)
         self.conversations_panel = ConversationsPanel(self, self.content_panel)
+        self.archived_conversations_panel = ArchivedConversationsPanel(
+            self, self.content_panel
+        )
+        self.archived_conversations_panel.Hide()
 
-        # Content panel: conversations_panel fills it entirely
+        # Content panel: both panels fill it; only one is shown at a time
         content_sizer = wx.BoxSizer(wx.VERTICAL)
         content_sizer.Add(self.conversations_panel, 1, wx.EXPAND)
+        content_sizer.Add(self.archived_conversations_panel, 1, wx.EXPAND)
         self.content_panel.SetSizer(content_sizer)
 
         # Main panel: nav sidebar on left, content on right
@@ -160,7 +171,7 @@ class MainWindow(wx.Frame):
         if self.background_mode:
             # Modules must already be installed for background mode to work.
             sys.exit(0)
-        from module_install import ModuleInstallDialog
+        from ui.dialogs.module_install import ModuleInstallDialog
         dlg    = ModuleInstallDialog(self)
         result = dlg.ShowModal()
         dlg.Destroy()
@@ -246,7 +257,7 @@ class MainWindow(wx.Frame):
                 time.sleep(2)
             sys.exit(1)
 
-        from api_startup import ApiStartupDialog
+        from ui.dialogs.api_startup import ApiStartupDialog
         dlg    = ApiStartupDialog(self, self.evolution_port)
         result = dlg.ShowModal()
         dlg.Destroy()
@@ -285,16 +296,17 @@ class MainWindow(wx.Frame):
         self.open_settings()
 
     def open_settings(self):
-        from settings_dialog import SettingsDialog
+        from ui.dialogs.settings_dialog import SettingsDialog
         dlg = SettingsDialog(self)
         dlg.ShowModal()
         dlg.Destroy()
 
     def apply_language_changes(self):
         """Refresh all visible translatable text after a language change."""
-        # Re-output with accessible_output2 so screen readers hear the new language
         self.navigation_panel.refresh_labels()
         self.conversations_panel.refresh_labels()
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.refresh_labels()
         # Update frame title (keep any suffix that might be present during sync)
         current_title = self.GetTitle()
         if " - " in current_title:
@@ -305,17 +317,47 @@ class MainWindow(wx.Frame):
         self.main_panel.Layout()
 
     def on_alt_1(self, event):
-        panels = self.content_panel.GetChildren()
-        for panel in panels:
-            panel.Hide()
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.Hide()
         self.conversations_panel.Show()
+        self.content_panel.Layout()
         self.conversations_panel.conversations_list.SetFocus()
-        #Check if list has selection
-        if self.conversations_panel.conversations_list.GetFocusedItem() != -1 and self.conversations_panel.conversations_list.GetItemCount() > 0:#Output the current focused conversation
-            self.output(self.conversations_panel.conversations_list.GetItemText(self.conversations_panel.conversations_list.GetFocusedItem()), interrupt=True)
+        if (self.conversations_panel.conversations_list.GetFocusedItem() != -1
+                and self.conversations_panel.conversations_list.GetItemCount() > 0):
+            self.output(
+                self.conversations_panel.conversations_list.GetItemText(
+                    self.conversations_panel.conversations_list.GetFocusedItem()
+                ),
+                interrupt=True,
+            )
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
+
+    # ── Language selection ────────────────────────────────────────────────────
+
+    def _ensure_language_selected(self):
+        """
+        Show the language-selection dialog if no language has been stored yet
+        in settings.  On Cancel the application exits immediately.
+        """
+        lang_already_set = bool(
+            self.settings.get("general", {}).get("language")
+        )
+        if lang_already_set:
+            return
+
+        from ui.dialogs.language_dialog import LanguageSelectionDialog
+        dlg    = LanguageSelectionDialog(parent=None)
+        result = dlg.ShowModal()
+        lang   = dlg.selected_language
+        dlg.Destroy()
+
+        if result != wx.ID_OK:
+            sys.exit(0)
+
+        self.settings.setdefault("general", {})["language"] = lang
+        self.save_settings()
 
     # ── First-run / autostart ─────────────────────────────────────────────────
 
@@ -391,7 +433,7 @@ class MainWindow(wx.Frame):
                 title = self.i18n.t("error").format(app_name=self.app_name)
             else:
                 # i18n not yet initialised — load pt-BR directly as default
-                from i18n import _load_translations
+                from core.i18n import _load_translations
                 _pt   = _load_translations("pt-BR")
                 msg   = _pt.get("settings_load_failed",
                                 "Erro ao carregar o arquivo de configuração:")
@@ -603,19 +645,47 @@ class MainWindow(wx.Frame):
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
 
     def set_chats(self):
-        self.chat_names.clear()
-        for chat in self.chats.values():
-            self.chat_names.append(
+        deleted  = set(self.settings.get("deleted_chats",  []))
+        archived = set(self.settings.get("archived_chats", []))
+        pinned   = set(self.settings.get("pinned_chats",   []))
+
+        main_chats, main_names = [], []
+        arch_chats, arch_names = [], []
+
+        for jid, chat in self.chats.items():
+            if jid in deleted:
+                continue
+            name = (
                 self._resolve_contact_name(chat)
                 or self.find_name_through_messages(chat)
                 or chat.get("pushName", "")
                 or self.find_jid_through_messages(chat)
-                or format_number(chat.get("remoteJid", ""))
+                or format_number(jid)
             )
-        #Save copy of chats and chat_names
-        self.conversations_panel.chats_list = list(self.chats.values())
-        self.conversations_panel.chat_names = self.chat_names
-        #Checks if window is still open
+            if jid in archived:
+                arch_chats.append(chat)
+                arch_names.append(name)
+            else:
+                main_chats.append(chat)
+                main_names.append(name)
+
+        # Pinned chats float to the top of the main list
+        def _sort_key(pair):
+            chat, name = pair
+            return (0 if chat.get("remoteJid", "") in pinned else 1, name.lower())
+
+        pairs = sorted(zip(main_chats, main_names), key=_sort_key)
+        main_chats = [c for c, _ in pairs]
+        main_names = [n for _, n in pairs]
+
+        self.chat_names = main_names
+        self.conversations_panel.chats_list = main_chats
+        self.conversations_panel.chat_names = main_names
+
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.chats_list = arch_chats
+            self.archived_conversations_panel.chat_names = arch_names
+
         if self.IsShown():
             self.add_chats_to_ui()
 
@@ -856,10 +926,9 @@ class MainWindow(wx.Frame):
         Called on the main thread after a queued message is successfully sent.
         Updates the UI status label and cleans up any temporary audio file.
         """
-        # Update the pending virtual message in the conversations panel.
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_sent(local_id)
-        # Clean up the voice recording temp file now that it has been uploaded.
+        # Clean up temp WAV for voice messages (media attachments keep their file).
         if audio_path and os.path.isfile(audio_path):
             try:
                 os.unlink(audio_path)
@@ -927,23 +996,311 @@ class MainWindow(wx.Frame):
             #Ignore audios that couldn't be saved for now
             pass
 
-    def mark_conversation_as_read(self, remote_jid):
-        pass
+    def mark_conversation_as_read(self, remote_jid: str):
+        """Mark conversation as read locally and notify the API."""
+        chat = self.chats.get(remote_jid)
+        if chat is not None:
+            chat["unreadCount"] = 0
+            wx.CallAfter(self.set_chats)
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/chat/markMessageAsRead/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            requests.post(
+                url,
+                json={"lastMessages": [{"key": {"remoteJid": remote_jid,
+                                                 "fromMe": False, "id": ""}}]},
+                headers=headers,
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    def mark_conversation_as_unread(self, remote_jid: str):
+        chat = self.chats.get(remote_jid)
+        if chat is not None:
+            chat["unreadCount"] = 1
+            self.save_data(self.chats, self.contacts)
+            wx.CallAfter(self.set_chats)
+
+    # ── Evolution API — profile / group info ─────────────────────────────────
+
+    def get_contact_profile(self, jid: str) -> dict:
+        """Fetch contact profile from Evolution API (runs on background thread)."""
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/chat/fetchProfile/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            r = requests.post(url, json={"number": jid}, headers=headers, timeout=10)
+            if r.status_code in (200, 201):
+                return r.json() or {}
+        except Exception:
+            pass
+        return {}
+
+    def get_group_info(self, jid: str) -> dict:
+        """Fetch group metadata from Evolution API (runs on background thread)."""
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/group/findGroupInfos/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            r = requests.post(url, json={"groupJid": jid}, headers=headers, timeout=10)
+            if r.status_code in (200, 201):
+                return r.json() or {}
+        except Exception:
+            pass
+        return {}
+
+    # ── Block ─────────────────────────────────────────────────────────────────
+
+    def block_contact(self, jid: str, action: str = "block"):
+        """action: 'block' or 'unblock'"""
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/chat/updateBlockStatus/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            requests.post(
+                url, json={"number": jid, "status": action},
+                headers=headers, timeout=10,
+            )
+        except Exception:
+            pass
+
+    # ── Mute ──────────────────────────────────────────────────────────────────
+
+    def is_chat_muted(self, jid: str) -> bool:
+        muted = self.settings.get("muted_chats", {})
+        expiry = muted.get(jid)
+        if expiry is None:
+            return False
+        if expiry == -1:
+            return True  # permanent
+        return time.time() < expiry
+
+    def mute_chat(self, jid: str, duration_secs: int):
+        """duration_secs=-1 means mute permanently."""
+        self.settings.setdefault("muted_chats", {})
+        if duration_secs == -1:
+            self.settings["muted_chats"][jid] = -1
+        else:
+            self.settings["muted_chats"][jid] = int(time.time()) + duration_secs
+        self.save_settings()
+
+    def unmute_chat(self, jid: str):
+        self.settings.setdefault("muted_chats", {})
+        self.settings["muted_chats"].pop(jid, None)
+        self.save_settings()
+
+    # ── Archive ───────────────────────────────────────────────────────────────
+
+    def is_chat_archived(self, jid: str) -> bool:
+        return jid in self.settings.get("archived_chats", [])
+
+    def archive_chat(self, jid: str):
+        lst = self.settings.setdefault("archived_chats", [])
+        if jid not in lst:
+            lst.append(jid)
+        self.save_settings()
+        wx.CallAfter(self.set_chats)
+
+    def unarchive_chat(self, jid: str):
+        lst = self.settings.setdefault("archived_chats", [])
+        if jid in lst:
+            lst.remove(jid)
+        self.save_settings()
+        wx.CallAfter(self.set_chats)
+
+    # ── Delete / Clear ────────────────────────────────────────────────────────
+
+    def is_chat_deleted(self, jid: str) -> bool:
+        return jid in self.settings.get("deleted_chats", [])
+
+    def delete_chat_local(self, jid: str):
+        lst = self.settings.setdefault("deleted_chats", [])
+        if jid not in lst:
+            lst.append(jid)
+        self.save_settings()
+        self.chats.pop(jid, None)
+        self.save_data(self.chats, self.contacts)
+        wx.CallAfter(self.set_chats)
+
+    def clear_chat_messages_local(self, jid: str):
+        chat = self.chats.get(jid)
+        if chat:
+            chat.setdefault("messages", {}).setdefault("messages", {})["records"] = []
+            self.settings.setdefault("cleared_chats", {})[jid] = int(time.time())
+            self.save_data(self.chats, self.contacts)
+            self.save_settings()
+
+    # ── Pin ───────────────────────────────────────────────────────────────────
+
+    def is_chat_pinned(self, jid: str) -> bool:
+        return jid in self.settings.get("pinned_chats", [])
+
+    def pin_chat(self, jid: str):
+        lst = self.settings.setdefault("pinned_chats", [])
+        if jid not in lst:
+            lst.append(jid)
+        self.save_settings()
+        wx.CallAfter(self.set_chats)
+
+    def unpin_chat(self, jid: str):
+        lst = self.settings.setdefault("pinned_chats", [])
+        if jid in lst:
+            lst.remove(jid)
+        self.save_settings()
+        wx.CallAfter(self.set_chats)
+
+    # ── Group ─────────────────────────────────────────────────────────────────
+
+    def leave_group(self, jid: str):
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/group/leaveGroup/{self.token}"
+        )
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            requests.delete(url, json={"groupJid": jid}, headers=headers, timeout=10)
+        except Exception:
+            pass
+        self.delete_chat_local(jid)
+
+    # ── Media / contact attachments ───────────────────────────────────────────
+
+    def send_media_attachment(
+        self, remote_jid: str, file_path: str,
+        media_type: str, caption: str = ""
+    ) -> bool:
+        """
+        Base64-encode a file and send it as a media message.
+        media_type: 'image' | 'video' | 'audio' | 'document'
+        """
+        import mimetypes
+        try:
+            with open(file_path, "rb") as fh:
+                media_b64 = base64.b64encode(fh.read()).decode("utf-8")
+        except Exception:
+            return False
+        mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        filename = os.path.basename(file_path)
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/message/sendMedia/{self.token}"
+        )
+        payload = {
+            "number":    remote_jid,
+            "mediatype": media_type,
+            "media":     media_b64,
+            "mimetype":  mime,
+            "fileName":  filename,
+            "caption":   caption,
+        }
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=60)
+            return r.status_code in (200, 201)
+        except Exception:
+            return False
+
+    def send_contact_attachment(self, remote_jid: str, contact_info: dict) -> bool:
+        """Send a contact card as an attachment."""
+        name = (
+            contact_info.get("name") or contact_info.get("pushName")
+            or contact_info.get("verifiedName") or ""
+        )
+        jid = contact_info.get("remoteJid", "")
+        phone_raw = jid.split("@")[0] if "@" in jid else jid
+        phone_fmt  = format_number(jid)
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/message/sendContact/{self.token}"
+        )
+        payload = {
+            "number":  remote_jid,
+            "contact": [{"fullName": name, "wuid": phone_raw, "phoneNumber": phone_fmt}],
+        }
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            return r.status_code in (200, 201)
+        except Exception:
+            return False
+
+    # ── Message edit / delete-for-everyone ────────────────────────────────────
+
+    def edit_message(self, remote_jid: str, message_id: str, new_text: str):
+        """Send an edited message to the Evolution API."""
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/message/updateMessage/{self.token}"
+        )
+        payload = {
+            "number":    remote_jid,
+            "key":       {"remoteJid": remote_jid, "fromMe": True, "id": message_id},
+            "text":      new_text,
+        }
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            requests.put(url, json=payload, headers=headers, timeout=15)
+        except Exception:
+            pass
+
+    def delete_message_for_everyone(self, remote_jid: str, message_id: str, from_me: bool):
+        """Delete a message for everyone via the Evolution API."""
+        url = (
+            f"{self.evolution_server}:{self.evolution_port}"
+            f"/message/deleteMessageForEveryone/{self.token}"
+        )
+        payload = {
+            "number":    remote_jid,
+            "key":       {"remoteJid": remote_jid, "fromMe": from_me, "id": message_id},
+        }
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            requests.delete(url, json=payload, headers=headers, timeout=15)
+        except Exception:
+            pass
 
     def add_chats_to_ui(self):
+        search = self.conversations_panel.search_field.GetValue().strip().lower()
         self.conversations_panel.conversations_list.DeleteAllItems()
-        for index, chat in enumerate(self.chats.values()):
-            #If search field has text, filter chats
-            if self.conversations_panel.search_field.GetValue().strip():
-                search_text = self.conversations_panel.search_field.GetValue().strip().lower()
-                chat_name = self.chat_names[index].lower()
-                if search_text not in chat_name:
-                    continue
-            string = f"\
-            {self.chat_names[index]} \
-            {f"{chat.get('unreadCount') or 0} {self.i18n.t('unread_messages') if int(chat.get('unreadCount')) > 1 else self.i18n.t('unread_message')} " if int(chat.get('unreadCount')) > 0 else ""}\
-            "
-            self.conversations_panel.conversations_list.Append((string,))
+        for i, chat in enumerate(self.conversations_panel.chats_list):
+            name = self.conversations_panel.chat_names[i]
+            if search and search not in name.lower():
+                continue
+            unread = int(chat.get("unreadCount") or 0)
+            if unread > 0:
+                unread_str = (
+                    f" {unread} "
+                    + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
+                )
+            else:
+                unread_str = ""
+            self.conversations_panel.conversations_list.Append((f"{name}{unread_str}",))
+
+        # Also refresh the archived panel if present
+        if hasattr(self, "archived_conversations_panel"):
+            panel = self.archived_conversations_panel
+            panel.conversations_list.DeleteAllItems()
+            for i, chat in enumerate(panel.chats_list):
+                name = panel.chat_names[i]
+                unread = int(chat.get("unreadCount") or 0)
+                if unread > 0:
+                    unread_str = (
+                        f" {unread} "
+                        + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
+                    )
+                else:
+                    unread_str = ""
+                panel.conversations_list.Append((f"{name}{unread_str}",))
 
     def monitor_internet_connection(self):
         while True:
