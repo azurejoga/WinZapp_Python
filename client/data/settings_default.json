@@ -8,8 +8,11 @@
     "general": {
         "language": "pt-BR",
         "sounds_enabled": true,
+        "notifications_enabled": true,
+        "updates_enabled": true,
         "first_run": true,
-        "autostart": false
+        "autostart": false,
+        "show_tray_icon": true
     },
     "status": {
         "messages_set_completed": false

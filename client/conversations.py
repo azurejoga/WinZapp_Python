@@ -2313,6 +2313,50 @@ class ConversationsPanel(wx.Panel):
         if chat is not None:
             self.navigate_to_conversation(chat)
 
+    # ── Real-time incoming message ────────────────────────────────────────────
+
+    def on_incoming_message(self, remote_jid: str, msg: dict):
+        """
+        Called (on the main thread) when a new message arrives via WebSocket.
+        If the conversation matching remote_jid is currently open, appends the
+        message to the list; otherwise does nothing (the unread badge in the
+        conversations list is updated separately via set_chats).
+        """
+        if self.conversation is None:
+            return
+        if self.conversation.get("remoteJid", "") != remote_jid:
+            return
+        # Reactions do not appear as standalone rows
+        if msg.get("messageType", "") == "reactionMessage":
+            return
+        # Avoid duplicates
+        msg_id = msg.get("key", {}).get("id", "")
+        if msg_id:
+            for existing in self._sorted_messages:
+                if existing.get("key", {}).get("id", "") == msg_id:
+                    return
+        self._sorted_messages.append(msg)
+        self.messages_list.Append((self._render_message_line(msg),))
+        last = self.messages_list.GetItemCount() - 1
+        if last >= 0:
+            self.messages_list.EnsureVisible(last)
+
+    def navigate_to_jid(self, jid: str):
+        """Select and open the conversation matching jid, clearing any search."""
+        # Clear search so all chats are visible
+        if self.search_field.GetValue():
+            self.search_field.SetValue("")
+            self.main_window.add_chats_to_ui()
+
+        # Find the chat index and activate it
+        for i, chat in enumerate(self.chats_list):
+            if chat.get("remoteJid", "") == jid:
+                self.conversations_list.Focus(i)
+                self.conversations_list.Select(i)
+                self.conversations_list.EnsureVisible(i)
+                self.navigate_to_conversation(chat)
+                break
+
     # ── Populate ─────────────────────────────────────────────────────────────
 
     def populate_messages(self):

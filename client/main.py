@@ -9,20 +9,29 @@ import requests
 import base64
 import socketio
 import atexit
+import ctypes
 from accessible_output2 import outputs
 from core.sound_system import SoundSystem, Sound
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
 from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
 from app_paths import resource_path, data_path
-from core.message_queue import MessageQueue
+from core.message_queue import MessageQueue, PendingMessage
 import wx
+import wx.adv
 from ui.dialogs.connect import Connect
 from ui.navigation import NavigationPanel
 from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
 import json
 from traceback import format_exc, format_exception
 import pyperclip
+
+# Tell Windows to use "WinZapp" as the App User Model ID so notifications
+# show the correct name instead of the executable filename.
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("WinZapp")
+except Exception:
+    pass
 
 class MainWindow(wx.Frame):
     def __init__(self):
@@ -140,13 +149,213 @@ class MainWindow(wx.Frame):
         self.SetSizer(frame_sizer)
 
         self.create_accelerator_table()
+
+        # ── Menu bar ──────────────────────────────────────────────────────────
+        self._update_checker = None
+        self._build_menubar()
+
+        # ── System tray icon ──────────────────────────────────────────────────
+        self.tray_icon = None
+        self._init_tray()
+
+        # ── Notification manager ──────────────────────────────────────────────
+        from core.notification_manager import NotificationManager
+        self.notification_manager = NotificationManager(self)
+
+        # Intercept window-close: hide to tray instead of quitting (when tray active)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
+
         # In background mode the window is intentionally hidden; it can be
         # restored later by a second instance or a future tray-icon action.
         if not self.background_mode:
             self.Show()
         #Set offline chats for the first time
         self.set_chats()
+
+        # ── Auto-updater ──────────────────────────────────────────────────────
+        if not self.background_mode:
+            wx.CallLater(2000, self._start_update_checker)
+
         app.MainLoop()
+
+    # ── Menu bar ─────────────────────────────────────────────────────────────
+
+    def _build_menubar(self):
+        """Create the Help menu bar with the Force Update item."""
+        self._ID_FORCE_UPDATE = wx.NewIdRef()
+        menubar    = wx.MenuBar()
+        help_menu  = wx.Menu()
+        help_menu.Append(self._ID_FORCE_UPDATE, self.i18n.t("menu_force_update"))
+        menubar.Append(help_menu, self.i18n.t("menu_help"))
+        self.SetMenuBar(menubar)
+        self.Bind(wx.EVT_MENU, self._on_force_update, id=self._ID_FORCE_UPDATE)
+
+    def _refresh_menubar(self):
+        """Retranslate the menu bar labels after a language change."""
+        mb = self.GetMenuBar()
+        if mb is None:
+            return
+        mb.SetMenuLabel(0, self.i18n.t("menu_help"))
+        mb.GetMenu(0).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
+            self.i18n.t("menu_force_update")
+        )
+
+    def _on_force_update(self, event):
+        if self._update_checker is None:
+            self._start_update_checker(force=True)
+        else:
+            self._update_checker.force_check()
+
+    # ── Auto-updater ──────────────────────────────────────────────────────────
+
+    def _start_update_checker(self, force: bool = False):
+        updates_enabled = self.settings.get("general", {}).get("updates_enabled", True)
+        if not updates_enabled and not force:
+            return
+        from updater import UpdateChecker
+        self._update_checker = UpdateChecker(self)
+        if force:
+            self._update_checker.force_check()
+        else:
+            self._update_checker.start()
+
+    # ── Tray / window lifecycle ───────────────────────────────────────────────
+
+    def _init_tray(self):
+        """Create the system-tray icon if the setting is enabled."""
+        show = self.settings.get("general", {}).get("show_tray_icon", True)
+        if show:
+            from core.tray_manager import TrayIcon
+            self.tray_icon = TrayIcon(self)
+
+    def _on_close(self, event):
+        """
+        Intercept the window-close button.
+        If the tray icon is active, hide the window instead of exiting.
+        """
+        if self.tray_icon is not None:
+            self.Hide()
+            event.Veto()
+        else:
+            self.real_exit()
+
+    def restore_window(self):
+        """Bring the WinZapp window to the foreground."""
+        if not self.IsShown():
+            self.Show()
+        if self.IsIconized():
+            self.Restore()
+        self.Raise()
+        self.SetFocus()
+
+    def real_exit(self):
+        """Completely close WinZapp, removing the tray icon and stopping all threads."""
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.RemoveIcon()
+                self.tray_icon.Destroy()
+            except Exception:
+                pass
+            self.tray_icon = None
+        if hasattr(self, "message_queue"):
+            self.message_queue.stop()
+        if self._update_checker is not None:
+            self._update_checker.stop()
+        wx.GetApp().ExitMainLoop()
+
+    # ── Navigate to conversation by JID ──────────────────────────────────────
+
+    def navigate_to_conversation_jid(self, jid: str):
+        """Bring the window to front and open the conversation matching jid."""
+        self.restore_window()
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel.navigate_to_jid(jid)
+
+    # ── Incoming real-time messages ───────────────────────────────────────────
+
+    def on_new_message(self, msg: dict):
+        """
+        Called on the main thread (via wx.CallAfter) when a new message
+        arrives via the messages.upsert WebSocket event.
+        Adds the message to local storage, updates the UI, and sends a
+        notification if appropriate.
+        """
+        key        = msg.get("key", {})
+        from_me    = key.get("fromMe", False)
+        remote_jid = key.get("remoteJid", "")
+        msg_id     = key.get("id", "")
+
+        if not remote_jid:
+            return
+
+        # ── Ensure the chat record exists ─────────────────────────────────────
+        if remote_jid not in self.chats:
+            self.chats[remote_jid] = {
+                "remoteJid":   remote_jid,
+                "unreadCount": 0,
+                "pushName":    msg.get("pushName", ""),
+                "messages":    {"messages": {
+                    "records":     [],
+                    "total":       0,
+                    "pages":       1,
+                    "currentPage": 1,
+                }},
+            }
+
+        chat = self.chats[remote_jid]
+
+        # ── Avoid duplicate insertions ────────────────────────────────────────
+        records = (
+            chat.setdefault("messages", {})
+                .setdefault("messages", {})
+                .setdefault("records", [])
+        )
+        if msg_id:
+            for existing in records:
+                if existing.get("key", {}).get("id") == msg_id:
+                    return  # already stored
+
+        records.append(msg)
+
+        # ── Update unread count (only for messages we received) ───────────────
+        if not from_me:
+            chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+
+        # ── Persist ───────────────────────────────────────────────────────────
+        self.save_data(self.chats, self.contacts)
+
+        # ── Update conversation list UI ───────────────────────────────────────
+        self.set_chats()
+
+        # ── Add message to the open conversation panel (if visible) ──────────
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel.on_incoming_message(remote_jid, msg)
+
+        # ── Download media in background ──────────────────────────────────────
+        media_types = {"audioMessage", "imageMessage", "videoMessage",
+                       "documentMessage", "stickerMessage"}
+        if msg.get("messageType") in media_types:
+            threading.Thread(
+                target=self.sync_if_media, args=(msg,), daemon=True
+            ).start()
+
+        # ── Send notification ─────────────────────────────────────────────────
+        if from_me:
+            return
+        if self.is_chat_muted(remote_jid):
+            return
+        if not self.settings.get("general", {}).get("notifications_enabled", True):
+            return
+        if not self.settings.get("general", {}).get("show_tray_icon", True):
+            return
+
+        from core.notification_manager import (
+            format_notification_title, format_notification_body
+        )
+        title = format_notification_title(msg, self, self.i18n)
+        body  = format_notification_body(msg, self.i18n)
+        if hasattr(self, "notification_manager"):
+            self.notification_manager.send(title, body, remote_jid)
 
     def connect_websocket(self):
         self.ws.sio.connect(f"{self.evolution_ws_server}:{self.evolution_port}/", socketio_path="socket.io", headers={"apikey": self.token}, namespaces=[f"/{self.token}"])
@@ -315,6 +524,11 @@ class MainWindow(wx.Frame):
         else:
             self.SetTitle(self.i18n.t("app_name"))
         self.main_panel.Layout()
+        # Refresh tray icon tooltip with new language
+        if self.tray_icon is not None:
+            self.tray_icon.refresh_labels()
+        # Refresh menu bar labels
+        self._refresh_menubar()
 
     def on_alt_1(self, event):
         if hasattr(self, "archived_conversations_panel"):
@@ -467,6 +681,8 @@ class MainWindow(wx.Frame):
         self.voicemsg_pauserecording_sound  = Sound(self.sound_system, "voicemsg_pauserecording.ogg")
         self.voicemsg_discard_sound         = Sound(self.sound_system, "voicemsg_discard.ogg")
         self.voicemsg_send_sound            = Sound(self.sound_system, "voicemsg_send.ogg")
+        # Background notification sound
+        self.message_background_sound       = Sound(self.sound_system, "message_background.ogg")
 
     def retrieve_token(self):
         try:
@@ -688,6 +904,9 @@ class MainWindow(wx.Frame):
 
         if self.IsShown():
             self.add_chats_to_ui()
+        # Refresh tray tooltip whenever chat list / unread counts change
+        if getattr(self, "tray_icon", None) is not None:
+            self.tray_icon.update_tooltip()
 
     def _find_alt_jid_from_messages(self, chat):
         """
