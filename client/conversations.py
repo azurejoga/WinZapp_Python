@@ -24,11 +24,17 @@ from ui.accessible import (
     AccessibleDiscardVoiceMessage,
     AccessiblePauseResumeRecording,
     AccessibleSendVoiceMessage,
+    AccessibleSearchInConversation,
+    AccessibleSearchNextResult,
+    AccessibleSearchPrevResult,
 )
 from core.utils import format_number, decrypt_bytes
 from app_paths import data_path
 from core.message_queue import PendingMessage
 from datetime import datetime
+
+# Compiled URL regex used for link extraction from message text
+_URL_RE = re.compile(r'https?://\S+|www\.\S+')
 
 
 class ConversationsPanel(wx.Panel):
@@ -91,6 +97,16 @@ class ConversationsPanel(wx.Panel):
         # When not None, the next sent message will be a quoted reply
         self._quoted_message: dict | None = None
 
+        # ── Search in conversation state ─────────────────────────────────────
+        # Indices in _sorted_messages that match the current search query
+        self._search_results: list = []
+        # Current position in _search_results (-1 = no active navigation)
+        self._search_result_idx: int = -1
+
+        # ── Link extraction state ────────────────────────────────────────────
+        # URLs found in the currently focused message
+        self._current_links: list = []
+
         self.init_UI()
         self.create_accelerator_table()
         self.create_accel_conversation()
@@ -109,6 +125,7 @@ class ConversationsPanel(wx.Panel):
         self.conversations_list.InsertColumn(0, i18n.t("conversations"), width=200)
         self.conversations_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_conversation_selected)
         self.conversations_list.Bind(wx.EVT_CONTEXT_MENU, self.on_conversations_context_menu)
+        self.conversations_list.Bind(wx.EVT_KEY_DOWN, self._on_conv_list_key_down)
         outer_sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
 
         # ── Search ──────────────────────────────────────────────────────────
@@ -142,6 +159,44 @@ class ConversationsPanel(wx.Panel):
         self._add_attachment_btn.Bind(wx.EVT_BUTTON, self.on_add_attachment)
         conv_sizer.Add(self._add_attachment_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
+        # ── Search in conversation button ───────────────────────────────────
+        self._search_open_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("search_in_conv")
+        )
+        self._search_open_btn.SetAccessible(AccessibleSearchInConversation())
+        self._search_open_btn.Bind(wx.EVT_BUTTON, self._on_open_search)
+        conv_sizer.Add(self._search_open_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+
+        # ── Search panel (hidden by default) ───────────────────────────────
+        self._search_panel = wx.Panel(self.conversation_panel)
+        search_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        self._search_close_btn = wx.Button(self._search_panel, label=i18n.t("search_close"))
+        self._search_close_btn.Bind(wx.EVT_BUTTON, self._on_close_search)
+        search_sizer.Add(self._search_close_btn, 0, wx.RIGHT, 5)
+
+        self._search_field_label = wx.StaticText(self._search_panel, label=i18n.t("search_in_conv"))
+        search_sizer.Add(self._search_field_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+
+        self._search_field = wx.TextCtrl(self._search_panel, style=wx.TE_DONTWRAP | wx.TE_PROCESS_ENTER)
+        self._search_field.Bind(wx.EVT_TEXT, self._on_search_text_changed)
+        self._search_field.Bind(wx.EVT_KEY_DOWN, self._on_search_key_down)
+        search_sizer.Add(self._search_field, 1, wx.EXPAND | wx.RIGHT, 5)
+
+        self._search_prev_btn = wx.Button(self._search_panel, label=i18n.t("search_prev_result"))
+        self._search_prev_btn.SetAccessible(AccessibleSearchPrevResult())
+        self._search_prev_btn.Bind(wx.EVT_BUTTON, self._on_search_prev)
+        search_sizer.Add(self._search_prev_btn, 0, wx.RIGHT, 5)
+
+        self._search_next_btn = wx.Button(self._search_panel, label=i18n.t("search_next_result"))
+        self._search_next_btn.SetAccessible(AccessibleSearchNextResult())
+        self._search_next_btn.Bind(wx.EVT_BUTTON, self._on_search_next)
+        search_sizer.Add(self._search_next_btn, 0)
+
+        self._search_panel.SetSizer(search_sizer)
+        self._search_panel.Hide()
+        conv_sizer.Add(self._search_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.messages_label = wx.StaticText(
             self.conversation_panel, label=i18n.t("messages")
         )
@@ -152,7 +207,19 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
+        self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
+
+        # ── Link controls (shown when focused message contains URLs) ─────────
+        self._links_panel = wx.Panel(self.conversation_panel)
+        self._links_label = wx.StaticText(
+            self._links_panel, label=i18n.t("links_section_label")
+        )
+        self._links_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._links_sizer.Add(self._links_label, 0, wx.LEFT | wx.TOP, 3)
+        self._links_panel.SetSizer(self._links_sizer)
+        self._links_panel.Hide()
+        conv_sizer.Add(self._links_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
         # ── Thumbnail (image / sticker / video) ─────────────────────────────
         self._media_bitmap = wx.StaticBitmap(
@@ -353,6 +420,9 @@ class ConversationsPanel(wx.Panel):
         # ── Conversation-level ───────────────────────────────────────────────
         self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # mute / unmute           (Ctrl+Shift+S)
         self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # mark as read            (Ctrl+Shift+M)
+        # ── Search / unread jump ─────────────────────────────────────────────
+        self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
+        self.ID_ALT_3           = wx.NewIdRef()  # jump to unread sep      (Alt+3)
 
         CS = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
         AS = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
@@ -371,6 +441,8 @@ class ConversationsPanel(wx.Panel):
             (wx.ACCEL_ALT,     ord("C"),         self.ID_ALT_C),
             (CS,               ord("S"),         self.ID_CTRL_SHIFT_S),
             (CS,               ord("M"),         self.ID_CTRL_SHIFT_M),
+            (CS,               ord("F"),         self.ID_CTRL_SHIFT_F),
+            (wx.ACCEL_ALT,     ord("3"),         self.ID_ALT_3),
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message,   id=self.ID_CTRL_R)
@@ -388,11 +460,15 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup, id=self.ID_ALT_C)
         self.Bind(wx.EVT_MENU, self._on_accel_mute,            id=self.ID_CTRL_SHIFT_S)
         self.Bind(wx.EVT_MENU, self._on_accel_mark_read,       id=self.ID_CTRL_SHIFT_M)
+        self.Bind(wx.EVT_MENU, self._on_accel_open_search,     id=self.ID_CTRL_SHIFT_F)
+        self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,     id=self.ID_ALT_3)
 
     # ── Conversations list events ───────────────────────────────────────────
 
     def on_conversation_selected(self, event):
-        index = event.GetIndex()
+        self.on_conversation_selected_by_index(event.GetIndex())
+
+    def on_conversation_selected_by_index(self, index):
         try:
             self.navigate_to_conversation(self.chats_list[index])
         except Exception:
@@ -406,6 +482,13 @@ class ConversationsPanel(wx.Panel):
         self._unread_sep_idx = -1  # reset separator for new conversation
         self._quoted_message = None
         self._reaction_map   = {}
+        # Reset search state
+        self._search_results    = []
+        self._search_result_idx = -1
+        if hasattr(self, "_search_panel") and self._search_panel.IsShown():
+            self._search_panel.Hide()
+            self._search_open_btn.Show()
+            self._search_field.SetValue("")
         self.conversation = conversation
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
@@ -502,6 +585,12 @@ class ConversationsPanel(wx.Panel):
         col.SetText(i18n.t("conversations"))
         self.conversations_list.SetColumn(0, col)
         self.search_label.SetLabel(i18n.t("search_conversations"))
+
+        self._search_open_btn.SetLabel(i18n.t("search_in_conv"))
+        self._search_close_btn.SetLabel(i18n.t("search_close"))
+        self._search_field_label.SetLabel(i18n.t("search_in_conv"))
+        self._search_prev_btn.SetLabel(i18n.t("search_prev_result"))
+        self._search_next_btn.SetLabel(i18n.t("search_next_result"))
 
         self.messages_label.SetLabel(i18n.t("messages"))
         col2 = wx.ListItem()
@@ -827,6 +916,13 @@ class ConversationsPanel(wx.Panel):
             self._on_cancel_edit()
         if self._quoted_message is not None:
             self._on_cancel_reply()
+        # Clear search state
+        self._search_results    = []
+        self._search_result_idx = -1
+        if hasattr(self, "_search_panel") and self._search_panel.IsShown():
+            self._search_panel.Hide()
+            self._search_open_btn.Show()
+            self._search_field.SetValue("")
         self.conversation = None
         self.conversation_panel.Hide()
         self.Layout()
@@ -960,7 +1056,7 @@ class ConversationsPanel(wx.Panel):
     def on_message_selected(self, event):
         """Show / hide action controls when the selection changes in the messages list."""
         index = event.GetIndex()
-        self._hide_all_media_controls()
+        self._hide_all_media_controls()   # also clears links panel
         if index < 0 or index >= len(self._sorted_messages):
             return
         if self._is_separator(self._sorted_messages[index]):
@@ -1021,9 +1117,17 @@ class ConversationsPanel(wx.Panel):
                 self._contact_converse_btn.Show()
                 self.conversation_panel.Layout()
 
+        # ── Link detection ────────────────────────────────────────────────
+        # Always check the rendered text for URLs (regardless of msg_type)
+        rendered = self.messages_list.GetItemText(index)
+        self._update_links_panel(self._extract_links(rendered))
+
     def on_message_activated(self, event):
         """Enter / double-click on a message item."""
-        index = event.GetIndex()
+        self._do_activate_message(event.GetIndex())
+
+    def _do_activate_message(self, index: int):
+        """Core activation logic shared by Enter, double-click, and Space."""
         if index < 0 or index >= len(self._sorted_messages):
             return
         if self._is_separator(self._sorted_messages[index]):
@@ -1032,6 +1136,17 @@ class ConversationsPanel(wx.Panel):
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         msg_id   = msg.get("key", {}).get("id", "")
+
+        # For text-based messages: open the first link if one is present
+        if msg_type in ("conversation", "extendedTextMessage", ""):
+            rendered = self.messages_list.GetItemText(index)
+            links = self._extract_links(rendered)
+            if links:
+                try:
+                    os.startfile(links[0])
+                except Exception:
+                    wx.LaunchDefaultBrowser(links[0])
+                return
 
         if msg_type == "audioMessage":
             duration = (msg_obj.get("audioMessage") or {}).get("seconds", 0) or 0
@@ -1203,8 +1318,102 @@ class ConversationsPanel(wx.Panel):
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
         self._contact_msg_jid = None
+        self._update_links_panel([])
         if self.conversation_panel.IsShown():
             self.conversation_panel.Layout()
+
+    # ── URL / link helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_links(text: str) -> list:
+        """Return deduplicated list of URLs found in *text*."""
+        matches = _URL_RE.findall(text)
+        seen = set()
+        out  = []
+        for m in matches:
+            # Strip trailing punctuation that is not part of the URL
+            m = m.rstrip('.,;:!?)\'"\\>]')
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out
+
+    def _update_links_panel(self, links: list):
+        """Rebuild the hyperlink controls below the messages list."""
+        # Destroy all child controls except the static label (first item)
+        for child in list(self._links_panel.GetChildren()):
+            if child is not self._links_label:
+                child.Destroy()
+        # Remove all items except the first (label) from the sizer
+        while self._links_sizer.GetItemCount() > 1:
+            self._links_sizer.Remove(1)
+
+        if not links:
+            self._links_panel.Hide()
+            self._current_links = []
+            if self.conversation_panel.IsShown():
+                self.conversation_panel.Layout()
+            return
+
+        self._current_links = links
+        i18n = self.main_window.i18n
+
+        for url in links:
+            ctrl = wx.HyperlinkCtrl(
+                self._links_panel,
+                label=url,
+                url=url,
+                style=wx.HL_DEFAULT_STYLE,
+            )
+            ctrl.Bind(wx.EVT_HYPERLINK, self._on_hyperlink_open)
+            ctrl.Bind(wx.EVT_KEY_DOWN,  self._on_link_key_down)
+            self._links_sizer.Add(ctrl, 0, wx.LEFT | wx.BOTTOM, 3)
+
+        self._links_panel.Show()
+        self._links_panel.Layout()
+        if self.conversation_panel.IsShown():
+            self.conversation_panel.Layout()
+
+    def _on_hyperlink_open(self, event):
+        """Open a link URL in the system's default application."""
+        url = event.GetURL()
+        try:
+            os.startfile(url)
+        except Exception:
+            wx.LaunchDefaultBrowser(url)
+
+    def _on_link_key_down(self, event):
+        """Ensure Space and Enter activate a focused HyperlinkCtrl."""
+        kc = event.GetKeyCode()
+        if kc in (wx.WXK_RETURN, wx.WXK_SPACE, wx.WXK_NUMPAD_ENTER):
+            ctrl = event.GetEventObject()
+            try:
+                os.startfile(ctrl.GetURL())
+            except Exception:
+                wx.LaunchDefaultBrowser(ctrl.GetURL())
+        else:
+            event.Skip()
+
+    # ── Keyboard Space-as-activate helpers ──────────────────────────────────
+
+    def _on_messages_list_key_down(self, event):
+        """Make Space fire the same activation as Enter / double-click."""
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            idx = self.messages_list.GetFocusedItem()
+            if idx >= 0:
+                self._do_activate_message(idx)
+        else:
+            event.Skip()
+
+    def _on_conv_list_key_down(self, event):
+        """Make Space open the focused conversation (same as Enter)."""
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            idx = self.conversations_list.GetFocusedItem()
+            if idx >= 0:
+                self.conversations_list.Select(idx)
+                self.on_conversation_selected_by_index(idx)
+        else:
+            event.Skip()
 
     def _try_show_thumbnail(self, jpeg_b64: str):
         """Decode and display an inline JPEG thumbnail (base64-encoded)."""
@@ -1566,7 +1775,7 @@ class ConversationsPanel(wx.Panel):
             today = datetime.now()
             if dt.date() == today.date():
                 return dt.strftime("%H:%M")
-            return dt.strftime("%d/%m/%Y %H:%M")
+            return dt.strftime(self.main_window.i18n.t("datetime_fmt"))
         except Exception:
             return ""
 
@@ -1762,6 +1971,38 @@ class ConversationsPanel(wx.Panel):
             return i18n.t("unread_sep_singular")
         return i18n.t("unread_sep_plural").format(count=count)
 
+    def _get_context_info(self, msg) -> "dict | None":
+        """Extract contextInfo from wherever it sits in the message hierarchy."""
+        msg_obj = msg.get("message") or {}
+        if not isinstance(msg_obj, dict):
+            return None
+        for sub_key in (
+            "extendedTextMessage", "audioMessage", "imageMessage",
+            "videoMessage", "documentMessage", "stickerMessage",
+            "locationMessage", "contactMessage", "buttonsMessage",
+            "listMessage",
+        ):
+            sub = msg_obj.get(sub_key)
+            if isinstance(sub, dict):
+                ctx = sub.get("contextInfo")
+                if isinstance(ctx, dict) and "quotedMessage" in ctx:
+                    return ctx
+        return None
+
+    def _get_quoted_sender(self, ctx: dict) -> str:
+        """Resolve the display name of the quoted message sender from contextInfo."""
+        participant = ctx.get("participant", "")
+        if not participant:
+            return ""
+        mw = self.main_window
+        contact = mw.contacts.get(participant)
+        if contact:
+            name = (contact.get("name") or contact.get("fullName") or
+                    contact.get("verifiedName") or contact.get("pushName") or "")
+            if name:
+                return name
+        return format_number(participant) or participant
+
     def _render_message_line(self, msg) -> str:
         """Produce the full display string for a single message row."""
         # Unread separator sentinel
@@ -1772,7 +2013,18 @@ class ConversationsPanel(wx.Panel):
         body     = (self._get_message_content(msg) or "").replace("\n", " ")
         sender   = self._sender_label(msg)
         status   = self._map_status(msg)
-        pieces = [f"{sender}: {body}"]
+        i18n     = self.main_window.i18n
+
+        # Check for quoted/reply context
+        ctx           = self._get_context_info(msg)
+        quoted_sender = self._get_quoted_sender(ctx) if ctx else ""
+
+        if quoted_sender:
+            header = f"{sender}, {i18n.t('replying_to').format(name=quoted_sender)}"
+        else:
+            header = sender
+
+        pieces = [f"{header}: {body}"]
         if time_str:
             pieces.append(f", {time_str}")
         if status:
@@ -1782,11 +2034,10 @@ class ConversationsPanel(wx.Panel):
         msg_id    = msg.get("key", {}).get("id", "")
         reactions = self._reaction_map.get(msg_id, {})
         if reactions:
-            i18n_r    = self.main_window.i18n
-            r_parts   = []
+            r_parts = []
             for emoji, count in reactions.items():
-                r_parts.append(f"{emoji}, {count} {i18n_r.t('total_label')}")
-            pieces.append(f". {i18n_r.t('reactions_label')} {', '.join(r_parts)}.")
+                r_parts.append(f"{emoji}, {count} {i18n.t('total_label')}")
+            pieces.append(f". {i18n.t('reactions_label')} {', '.join(r_parts)}.")
 
         return " ".join(pieces)
 
@@ -1865,7 +2116,7 @@ class ConversationsPanel(wx.Panel):
                                 )
                             else:
                                 note = i18n.t("last_seen_date").format(
-                                    date=dt.strftime("%d/%m/%Y"),
+                                    date=dt.strftime(i18n.t("date_fmt")),
                                     time=dt.strftime("%H:%M"),
                                 )
                         except Exception:
@@ -2251,6 +2502,96 @@ class ConversationsPanel(wx.Panel):
         if self._is_separator(msg):
             return
         self._show_message_text_popup(msg)
+
+    # ── Alt+3: jump to unread separator ────────────────────────────────────
+
+    def _on_accel_jump_unread(self, event):
+        i18n = self.main_window.i18n
+        if self._unread_sep_idx < 0 or self._unread_sep_idx >= self.messages_list.GetItemCount():
+            self.main_window.output(i18n.t("no_unread_in_conv"), interrupt=True)
+            return
+        self.messages_list.Focus(self._unread_sep_idx)
+        self.messages_list.Select(self._unread_sep_idx, True)
+        self.messages_list.EnsureVisible(self._unread_sep_idx)
+        self.messages_list.SetFocus()
+        self.main_window.output(
+            self.messages_list.GetItemText(self._unread_sep_idx),
+            interrupt=True,
+        )
+
+    # ── Ctrl+Shift+F: search in conversation ───────────────────────────────
+
+    def _on_accel_open_search(self, event):
+        self._on_open_search(event)
+
+    def _on_open_search(self, event):
+        self._search_panel.Show()
+        self._search_open_btn.Hide()
+        self.conversation_panel.Layout()
+        self._search_field.SetFocus()
+
+    def _on_close_search(self, event):
+        self._search_panel.Hide()
+        self._search_open_btn.Show()
+        self._search_results = []
+        self._search_result_idx = -1
+        self._search_field.SetValue("")
+        self.conversation_panel.Layout()
+        self.messages_list.SetFocus()
+
+    def _on_search_text_changed(self, event):
+        query = self._search_field.GetValue()
+        if not query.strip():
+            self._search_results = []
+            self._search_result_idx = -1
+            return
+        qlow = query.lower()
+        self._search_results = [
+            i for i, msg in enumerate(self._sorted_messages)
+            if not self._is_separator(msg)
+            and qlow in self._render_message_line(msg).lower()
+        ]
+        self._search_result_idx = -1
+
+    def _on_search_key_down(self, event):
+        key   = event.GetKeyCode()
+        shift = event.ShiftDown()
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if shift:
+                self._on_search_prev(None)
+            else:
+                self._on_search_next(None)
+        else:
+            event.Skip()
+
+    def _on_search_next(self, event):
+        i18n = self.main_window.i18n
+        if not self._search_results:
+            self.main_window.output(i18n.t("search_no_results"), interrupt=True)
+            return
+        self._search_result_idx = (self._search_result_idx + 1) % len(self._search_results)
+        self._jump_to_search_result()
+
+    def _on_search_prev(self, event):
+        i18n = self.main_window.i18n
+        if not self._search_results:
+            self.main_window.output(i18n.t("search_no_results"), interrupt=True)
+            return
+        self._search_result_idx = (self._search_result_idx - 1) % len(self._search_results)
+        self._jump_to_search_result()
+
+    def _jump_to_search_result(self):
+        i18n  = self.main_window.i18n
+        idx   = self._search_results[self._search_result_idx]
+        total = len(self._search_results)
+        self.messages_list.Focus(idx)
+        self.messages_list.Select(idx, True)
+        self.messages_list.EnsureVisible(idx)
+        ann = i18n.t("search_result").format(
+            current=self._search_result_idx + 1,
+            total=total,
+        )
+        self.main_window.output(ann, interrupt=True)
 
     def _show_message_text_popup(self, msg: dict):
         """Open a read-only dialog showing the full message text (100-char lines)."""
@@ -2807,11 +3148,23 @@ class ArchivedConversationsPanel(wx.Panel):
         self.conversations_list.Bind(
             wx.EVT_CONTEXT_MENU, self.on_context_menu
         )
+        self.conversations_list.Bind(wx.EVT_KEY_DOWN, self._on_arch_list_key_down)
         sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
 
         self.SetSizer(sizer)
 
     # ── Events ────────────────────────────────────────────────────────────────
+
+    def _on_arch_list_key_down(self, event):
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            idx = self.conversations_list.GetFocusedItem()
+            if idx >= 0:
+                self.conversations_list.Select(idx)
+                class _E:
+                    def GetIndex(self): return idx
+                self.on_conversation_selected(_E())
+        else:
+            event.Skip()
 
     def on_conversation_selected(self, event):
         index = event.GetIndex()

@@ -22,6 +22,7 @@ import wx.adv
 from ui.dialogs.connect import Connect
 from ui.navigation import NavigationPanel
 from ui.conversations import ConversationsPanel, ArchivedConversationsPanel
+from status_panel import StatusPanel
 import json
 from traceback import format_exc, format_exception
 import pyperclip
@@ -64,6 +65,10 @@ class MainWindow(wx.Frame):
         self.i18n = I18n(self)
         self.i18n.get_language()
 
+        # Terms of service – show once before anything else happens
+        if not self.background_mode:
+            self._check_terms_acceptance()
+
         #bind exception global handler for unexpected errors
         sys.excepthook = self.exception_handler
 
@@ -98,11 +103,15 @@ class MainWindow(wx.Frame):
         if not self.background_mode:
             self.startup_sound.play()
 
+        # Track whether the user went through the pairing flow this session
+        self._just_paired = False
+
         #Check for what window should be shown (skipped in background mode)
         if not self.background_mode:
             if not self.connect.check_connection_status():
                 self.connect.show_connection_dial()
                 self.ws.sio.disconnect()
+                self._just_paired = True
         self.retrieve_token()
         #Initialize websocket
         self.ws = WebSocketClient(self, self.connect, self.token)
@@ -130,11 +139,14 @@ class MainWindow(wx.Frame):
             self, self.content_panel
         )
         self.archived_conversations_panel.Hide()
+        self.status_panel = StatusPanel(self, self.content_panel)
+        self.status_panel.Hide()
 
-        # Content panel: both panels fill it; only one is shown at a time
+        # Content panel: all panels fill it; only one is shown at a time
         content_sizer = wx.BoxSizer(wx.VERTICAL)
         content_sizer.Add(self.conversations_panel, 1, wx.EXPAND)
         content_sizer.Add(self.archived_conversations_panel, 1, wx.EXPAND)
+        content_sizer.Add(self.status_panel, 1, wx.EXPAND)
         self.content_panel.SetSizer(content_sizer)
 
         # Main panel: nav sidebar on left, content on right
@@ -174,6 +186,10 @@ class MainWindow(wx.Frame):
             self.Show()
         #Set offline chats for the first time
         self.set_chats()
+
+        # ── Quick tip after first pairing ─────────────────────────────────────
+        if not self.background_mode and self._just_paired:
+            wx.CallAfter(self._check_quick_tip)
 
         # ── Auto-updater ──────────────────────────────────────────────────────
         if not self.background_mode:
@@ -542,16 +558,31 @@ class MainWindow(wx.Frame):
 
     def create_accelerator_table(self):
         #Set IDs
-        self.ID_ALT_1 = wx.NewIdRef()
+        self.ID_ALT_1      = wx.NewIdRef()
+        self.ID_ALT_4      = wx.NewIdRef()
+        self.ID_ALT_5      = wx.NewIdRef()
         self.ID_CTRL_COMMA = wx.NewIdRef()
+        self.ID_F1         = wx.NewIdRef()
         #create accelerator table
         accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_ALT,  ord('1'),   self.ID_ALT_1),
-            (wx.ACCEL_CTRL, ord(','),   self.ID_CTRL_COMMA),
+            (wx.ACCEL_ALT,    ord('1'),    self.ID_ALT_1),
+            (wx.ACCEL_ALT,    ord('4'),    self.ID_ALT_4),
+            (wx.ACCEL_ALT,    ord('5'),    self.ID_ALT_5),
+            (wx.ACCEL_CTRL,   ord(','),    self.ID_CTRL_COMMA),
+            (wx.ACCEL_NORMAL, wx.WXK_F1,  self.ID_F1),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_alt_1,       id=self.ID_ALT_1)
+        self.Bind(wx.EVT_MENU, self.on_alt_4,       id=self.ID_ALT_4)
+        self.Bind(wx.EVT_MENU, self.on_alt_5,       id=self.ID_ALT_5)
         self.Bind(wx.EVT_MENU, self.on_ctrl_comma,  id=self.ID_CTRL_COMMA)
+        self.Bind(wx.EVT_MENU, self.on_f1,          id=self.ID_F1)
+
+    def on_f1(self, event):
+        from ui.dialogs.shortcuts_dialog import ShortcutsDialog
+        dlg = ShortcutsDialog(self)
+        dlg.ShowModal()
+        dlg.Destroy()
 
     def on_ctrl_comma(self, event):
         self.open_settings()
@@ -568,6 +599,8 @@ class MainWindow(wx.Frame):
         self.conversations_panel.refresh_labels()
         if hasattr(self, "archived_conversations_panel"):
             self.archived_conversations_panel.refresh_labels()
+        if hasattr(self, "status_panel"):
+            self.status_panel.refresh_labels()
         # Update frame title (keep any suffix that might be present during sync)
         current_title = self.GetTitle()
         if " - " in current_title:
@@ -585,6 +618,8 @@ class MainWindow(wx.Frame):
     def on_alt_1(self, event):
         if hasattr(self, "archived_conversations_panel"):
             self.archived_conversations_panel.Hide()
+        if hasattr(self, "status_panel"):
+            self.status_panel.Hide()
         self.conversations_panel.Show()
         self.content_panel.Layout()
         self.conversations_panel.conversations_list.SetFocus()
@@ -596,6 +631,25 @@ class MainWindow(wx.Frame):
                 ),
                 interrupt=True,
             )
+
+    def on_alt_4(self, event):
+        self.conversations_panel.Hide()
+        if hasattr(self, "status_panel"):
+            self.status_panel.Hide()
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.Show()
+            self.content_panel.Layout()
+            self.archived_conversations_panel.conversations_list.SetFocus()
+
+    def on_alt_5(self, event):
+        self.conversations_panel.Hide()
+        if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel.Hide()
+        if hasattr(self, "status_panel"):
+            self.status_panel.Show()
+            self.content_panel.Layout()
+            self.status_panel._add_status_btn.SetFocus()
+            self.status_panel.on_show()
 
     def output(self, text, interrupt=False):
         self.speak_output.output(text, interrupt=interrupt)
@@ -681,6 +735,67 @@ class MainWindow(wx.Frame):
             disable_autostart()
             self.settings.setdefault("general", {})["autostart"] = False
             self.save_settings()
+
+    # ── Quick tip ─────────────────────────────────────────────────────────────
+
+    def _check_quick_tip(self):
+        """
+        Show the "quick tip" (F1 shortcut hint) once after the user's first
+        successful pairing.  Guarded by the ``quick_tip_shown`` setting so it
+        never shows twice.
+        """
+        if self.settings.get("general", {}).get("quick_tip_shown", False):
+            return
+        self.settings.setdefault("general", {})["quick_tip_shown"] = True
+        self.save_settings()
+        wx.MessageBox(
+            self.i18n.t("quick_tip_message"),
+            self.i18n.t("quick_tip_title"),
+            wx.OK | wx.ICON_INFORMATION,
+            self,
+        )
+
+    # ── Terms of service ─────────────────────────────────────────────────────
+
+    def _check_terms_acceptance(self):
+        """
+        Show the terms-of-service dialog exactly once.
+        If the user declines, the application exits immediately.
+        """
+        if self.settings.get("general", {}).get("terms_alert_displayed", False):
+            return
+
+        dlg = wx.Dialog(
+            None,
+            title=self.i18n.t("terms_title"),
+            style=wx.DEFAULT_DIALOG_STYLE,
+        )
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        msg_ctrl = wx.StaticText(dlg, label=self.i18n.t("terms_message"))
+        msg_ctrl.Wrap(480)
+        sizer.Add(msg_ctrl, 0, wx.ALL, 15)
+
+        btn_sizer = wx.StdDialogButtonSizer()
+        accept_btn = wx.Button(dlg, wx.ID_OK,     self.i18n.t("terms_accept"))
+        decline_btn = wx.Button(dlg, wx.ID_CANCEL, self.i18n.t("terms_decline"))
+        btn_sizer.AddButton(accept_btn)
+        btn_sizer.AddButton(decline_btn)
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+
+        dlg.SetSizer(sizer)
+        sizer.Fit(dlg)
+        dlg.CenterOnScreen()
+
+        result = dlg.ShowModal()
+        dlg.Destroy()
+
+        if result == wx.ID_OK:
+            self.settings.setdefault("general", {})["terms_alert_displayed"] = True
+            self.save_settings()
+        else:
+            sys.exit(0)
 
     def load_settings(self):
         settings_file = data_path("settings.json")
@@ -1646,7 +1761,7 @@ class MainWindow(wx.Frame):
                     if dt.date() == today:
                         time_str = dt.strftime("%H:%M")
                     else:
-                        time_str = dt.strftime("%d/%m/%Y %H:%M")
+                        time_str = dt.strftime(i18n.t("datetime_fmt"))
                 except Exception:
                     pass
             if from_me:
@@ -1723,7 +1838,7 @@ class MainWindow(wx.Frame):
                 if dt.date() == today:
                     time_str = dt.strftime("%H:%M")
                 else:
-                    time_str = dt.strftime("%d/%m/%Y %H:%M")
+                    time_str = dt.strftime(i18n.t("datetime_fmt"))
             except Exception:
                 pass
 
