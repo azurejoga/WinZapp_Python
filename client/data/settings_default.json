@@ -6,7 +6,7 @@
         "evolution_api_key": "wz-local-api-key"
     },
     "general": {
-        "language": "pt-BR",
+        "language": "",
         "sounds_enabled": true,
         "notifications_enabled": true,
         "updates_enabled": true,

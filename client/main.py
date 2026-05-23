@@ -432,26 +432,63 @@ class MainWindow(wx.Frame):
 
     def ensure_api_modules_installed(self):
         """
-        If api/start.js is present but api/node_modules is absent, show the
-        module-install dialog.  The dialog runs `npm install` + `npm run
-        db:generate` in the background.  If the user cancels or an error
-        occurs, the application exits immediately.
+        Ensure the Evolution API is cloned, compiled, and has its node_modules.
 
-        In background mode the dialog is never shown; if modules are missing
-        the process exits silently (first run always happens in normal mode).
+        node/node.exe is mandatory in all scenarios — it is the portable Node.js
+        runtime bundled with WinZapp that drives both npm and the API itself.
+        Its absence is always a fatal error.
+
+        Depending on what is present inside api/:
+
+          dist/main.js absent  →  API not yet cloned/compiled.
+                                   Show ApiSetupDialog (git clone + npm install
+                                   + npm run build).  This is the expected state
+                                   for a fresh install or first developer run.
+
+          dist/main.js present
+          node_modules absent  →  API compiled but modules were removed.
+                                   Show ModuleInstallDialog (npm install only).
+
+          Both present         →  Nothing to do.
+
+        In background mode dialogs are never shown; if the setup is incomplete
+        the process exits silently.
         """
-        start_js     = resource_path("api", "start.js")
-        node_modules = resource_path("api", "node_modules")
-        # Nothing to do: no bundled api/, or modules already installed
-        if not os.path.isfile(start_js) or os.path.isdir(node_modules):
+        node_exe     = resource_path("node", "node.exe")
+        dist_main    = resource_path("api",  "dist", "main.js")
+        node_modules = resource_path("api",  "node_modules")
+
+        # node.exe is mandatory — without it neither npm nor the API can run.
+        if not os.path.isfile(node_exe):
+            wx.MessageBox(
+                "O Node.js portátil não foi encontrado (node/node.exe).\n\n"
+                "Este arquivo é essencial para o funcionamento do WinZapp. "
+                "Por favor, reinstale o programa.",
+                "Node.js não encontrado",
+                wx.OK | wx.ICON_ERROR,
+            )
+            sys.exit(1)
+
+        # Everything already set up — nothing to do.
+        if os.path.isfile(dist_main) and os.path.isdir(node_modules):
             return
+
         if self.background_mode:
-            # Modules must already be installed for background mode to work.
             sys.exit(0)
-        from ui.dialogs.module_install import ModuleInstallDialog
-        dlg    = ModuleInstallDialog(self)
-        result = dlg.ShowModal()
-        dlg.Destroy()
+
+        if not os.path.isfile(dist_main):
+            # API not cloned/built yet → full setup (clone + install + build)
+            from ui.dialogs.api_setup import ApiSetupDialog
+            dlg    = ApiSetupDialog(self)
+            result = dlg.ShowModal()
+            dlg.Destroy()
+        else:
+            # API built but node_modules missing → npm install only
+            from ui.dialogs.module_install import ModuleInstallDialog
+            dlg    = ModuleInstallDialog(self)
+            result = dlg.ShowModal()
+            dlg.Destroy()
+
         if result != wx.ID_OK:
             sys.exit(0)
 
@@ -520,6 +557,19 @@ class MainWindow(wx.Frame):
         """
         if self._is_evolution_running():
             return  # Already up (e.g. left running from a previous session)
+
+        node_exe  = resource_path("node", "node.exe")
+        start_js  = resource_path("api",  "start.js")
+        dist_main = resource_path("api",  "dist", "main.js")
+
+        # All three files are required to start the bundled API.
+        # If any is missing (setup incomplete or not yet run), skip silently —
+        # ensure_api_modules_installed() already handled the missing node.exe
+        # case; dist/main.js absence means setup was cancelled or not done yet.
+        if not (os.path.isfile(node_exe)
+                and os.path.isfile(start_js)
+                and os.path.isfile(dist_main)):
+            return
 
         self._evolution_log_path = None
         self._evolution_log_fh   = None

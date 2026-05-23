@@ -12,15 +12,18 @@ client/logs/
 
 # Bundled Node.js runtime (binary distribution, ~50 MB)
 /client/node/
+/client/node-v24.15.0-win-x64.zip
 
 # Evolution API directory.
 # The entire directory is excluded because it contains the cloned upstream
 # repo (~hundreds of MB) plus runtime state (pgdata, instances, store, logs).
-# EXCEPTIONS: start.js and .env are WinZapp-specific config files that belong
-# in version control.
+# EXCEPTIONS: start.js, .env and package.json are WinZapp-specific files that
+# belong in version control.  package.json lists the minimal runtime deps
+# (embedded-postgres, prisma) needed before setup_api.py clones the full API.
 /client/api/*
 !/client/api/start.js
 !/client/api/.env
+!/client/api/package.json
 
 # Evolution API runtime state (redundant with /api/* but explicit for clarity)
 /client/api/pgdata/

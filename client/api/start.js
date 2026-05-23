@@ -18,7 +18,6 @@
 'use strict';
 
 const path = require('path');
-const fs   = require('fs');
 const { execFileSync } = require('child_process');
 
 // ── Paths ──────────────────────────────────────────────────────────────────
@@ -62,19 +61,8 @@ async function main() {
     persistent:  true,   // data survives process restarts
   });
 
-  // initialise() calls initdb — only run it when the data directory does not
-  // yet exist.  On subsequent launches the directory is already populated and
-  // calling initdb again would fail with "directory is not empty".
-  if (!fs.existsSync(PG_DATA_DIR)) {
-    try {
-      await pg.initialise();
-    } catch (err) {
-      console.error('[WinZapp] Failed to initialise embedded PostgreSQL:', err.message);
-      process.exit(1);
-    }
-  }
-
   try {
+    await pg.initialise();  // runs initdb only on first launch
     await pg.start();
   } catch (err) {
     console.error('[WinZapp] Failed to start embedded PostgreSQL:', err.message);

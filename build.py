@@ -29,8 +29,13 @@ Before running this script you must prepare:
            and extract its contents into a 'node/' folder at the project root.
            Verify: node/node.exe must exist.
 
-  api/   - see api/README-SETUP.md for the one-time Evolution API build steps.
-           Verify: api/dist/main.js must exist.
+  client/api/ - run setup_api.py to clone the Evolution API (honours the
+                EVOLUTION_TAG_VERSION variable in .env), then inside client/api/ run:
+                  npm install embedded-postgres --save
+                  npm install
+                  npm run db:generate
+                  npm run build
+                Verify: client/api/dist/main.js must exist.
 
 Usage:
   venv\\Scripts\\python.exe build.py
@@ -52,8 +57,8 @@ DIST_DIR      = os.path.join(ROOT_DIR, "dist")
 VENV_DIR      = os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets (developer prepares these once)
-NODE_DIR      = os.path.join(ROOT_DIR, "node")   # portable Node.js
-API_DIR       = os.path.join(ROOT_DIR, "api")    # pre-built Evolution API
+NODE_DIR      = os.path.join(ROOT_DIR, "node")          # portable Node.js
+API_DIR       = os.path.join(ROOT_DIR, "client", "api") # Evolution API (set up via setup_api.py)
 
 NUITKA_CMD  = os.path.join(VENV_DIR, "Scripts", "nuitka.cmd")
 PYTHON_CMD  = os.path.join(VENV_DIR, "Scripts", "python.exe")
@@ -152,14 +157,17 @@ def check_tools():
     api_main = os.path.join(API_DIR, "dist", "main.js")
     if not os.path.isfile(api_main):
         missing.append(
-            "api/dist/main.js  -- Evolution API not built. In api/ run:\n"
-            "    npm install embedded-postgres --save\n"
-            "    npm install\n"
-            "    npm run db:generate   (generates Prisma client types)\n"
-            "    npm run build"
+            "client/api/dist/main.js  -- Evolution API not built.\n"
+            "    1. Run:  venv\\Scripts\\python.exe setup_api.py\n"
+            "       (set EVOLUTION_TAG_VERSION in .env to pin a specific release tag)\n"
+            "    2. Then inside client/api/ run:\n"
+            "         npm install embedded-postgres --save\n"
+            "         npm install\n"
+            "         npm run db:generate\n"
+            "         npm run build"
         )
 
-    # Prisma client must be generated before building (npm run db:generate)
+    # Prisma client must be generated before building (npm run db:generate in client/api/)
     prisma_client = os.path.join(API_DIR, "node_modules", ".prisma", "client", "index.js")
     if not os.path.isfile(prisma_client) and os.path.isfile(api_main):
         # dist exists but generated client is missing – warn, don't fail
