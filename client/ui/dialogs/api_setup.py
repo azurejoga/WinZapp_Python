@@ -383,26 +383,63 @@ class ApiSetupDialog(wx.Dialog):
             if self._cancelled:
                 return
 
-            # ── Step 7: npm run db:deploy (only if the script exists) ──────
+            # ── Step 7: db:deploy — Windows-compatible Python implementation ─
+            # The upstream npm script uses Unix commands (rm -rf, cp -r) that
+            # don't exist on Windows.  We replicate the three steps in Python:
+            #   1. shutil.rmtree  → replaces: rm -rf ./prisma/migrations
+            #   2. shutil.copytree → replaces: cp -r ./prisma/postgresql-migrations
+            #                                       ./prisma/migrations
+            #   3. node prisma CLI → replaces: npx prisma migrate deploy
             has_db_deploy = False
             try:
                 with open(pkg_json_path, encoding="utf-8") as f:
                     pkg2 = json.load(f)
-                has_db_deploy = "db:deploy" in pkg2.get("scripts", {})
+                scripts = pkg2.get("scripts", {})
+                has_db_deploy = "db:deploy" in scripts or "db:deploy:win" in scripts
             except Exception:
                 pass
 
             if has_db_deploy:
                 self._set_status("Aplicando migrações Prisma (db:deploy)...")
+                prisma_dir     = os.path.join(api_dir, "prisma")
+                migrations_dst = os.path.join(prisma_dir, "migrations")
+                migrations_src = os.path.join(prisma_dir, "postgresql-migrations")
+                schema_path    = os.path.join(prisma_dir, "postgresql-schema.prisma")
+
+                # 1. Remove previous migrations folder
+                try:
+                    if os.path.exists(migrations_dst):
+                        shutil.rmtree(migrations_dst)
+                except Exception as exc:
+                    if not self._cancelled:
+                        wx.CallAfter(self._finish_error,
+                                     f"Falha ao remover pasta migrations:\n\n{exc}")
+                    return
+
+                # 2. Copy provider migrations into place
+                try:
+                    if os.path.exists(migrations_src):
+                        shutil.copytree(migrations_src, migrations_dst)
+                except Exception as exc:
+                    if not self._cancelled:
+                        wx.CallAfter(self._finish_error,
+                                     f"Falha ao copiar migrations:\n\n{exc}")
+                    return
+
+                # 3. Run prisma migrate deploy via the local prisma CLI
+                prisma_cli = os.path.join(
+                    api_dir, "node_modules", "prisma", "build", "index.js"
+                )
                 env = {**os.environ, "DATABASE_PROVIDER": "postgresql"}
                 ok, err = self._run_subprocess(
-                    [node_exe, npm_cli, "run", "db:deploy"],
+                    [node_exe, prisma_cli, "migrate", "deploy",
+                     "--schema", schema_path],
                     cwd=api_dir,
                     env=env,
                 )
                 if not ok and not self._cancelled:
                     wx.CallAfter(self._finish_error,
-                                 f"Falha em npm run db:deploy:\n\n{err}")
+                                 f"Falha em prisma migrate deploy:\n\n{err}")
                     return
 
             if self._cancelled:

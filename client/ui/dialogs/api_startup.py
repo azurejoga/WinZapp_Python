@@ -53,27 +53,21 @@ class ApiStartupDialog(wx.Dialog):
     # ── UI construction ────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ① Description as a read-only, borderless TextCtrl (same rationale as
-        #   ModuleInstallDialog — avoids NVDA skipping / duplicating the text).
-        desc = wx.TextCtrl(
-            self,
-            value=self._i18n.t("api_startup_text"),
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_NO_VSCROLL | wx.BORDER_NONE,
-        )
-        desc.SetBackgroundColour(self.GetBackgroundColour())
-        desc.SetMinSize((-1, desc.GetCharHeight() * 3 + 8))
-
-        # ② Pulsing gauge (indeterminate)
+        # Pulsing gauge (indeterminate)
         self._gauge = wx.Gauge(self, range=100,
                                style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
 
+        cancel_btn = wx.Button(self, wx.ID_CANCEL,
+                               label=self._i18n.t("cancel"))
+        cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
+
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(desc,        0, wx.ALL | wx.EXPAND, 12)
-        sizer.Add(self._gauge, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 12)
+        sizer.Add(self._gauge, 0, wx.ALL | wx.EXPAND, 12)
+        sizer.Add(cancel_btn,  0, wx.ALIGN_CENTER | wx.BOTTOM, 12)
 
         self.SetSizer(sizer)
         sizer.Fit(self)
-        self.SetMinSize((420, -1))
+        self.SetMinSize((380, -1))
         self.Centre()
 
     # ── Timer ──────────────────────────────────────────────────────────────
@@ -81,10 +75,19 @@ class ApiStartupDialog(wx.Dialog):
     def _on_pulse(self, _event):
         self._gauge.Pulse()
 
+    # ── Cancel ────────────────────────────────────────────────────────────
+
+    def _on_cancel(self, _event):
+        """User clicked Cancel — stop polling and close with CANCEL."""
+        self._done = True
+        self._timer.Stop()
+        self.EndModal(wx.ID_CANCEL)
+
     # ── Prevent accidental close (Alt-F4) ─────────────────────────────────
 
     def _on_close_attempt(self, _event):
-        pass  # swallow — dialog closes only when API is ready or timed out
+        """Alt-F4 is treated the same as Cancel."""
+        self._on_cancel(_event)
 
     # ── Background polling thread ──────────────────────────────────────────
 
