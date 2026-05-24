@@ -2,11 +2,11 @@
 WinZapp build script.
 
 Steps:
-  1. Check required tools (nuitka, gcc, windres) and pre-built api/ + node/
+  1. Check required tools (nuitka, gcc, windres) and pre-built api/ + client/node/
   2. Compile client with Nuitka --mode=onefile -> build/WinZapp.exe
        (sounds, languages, lib are external; only Python + wx etc. go inside)
   3. Assemble staging dir:
-       WinZapp.exe + lib/ + sounds/ + languages/ + data/ + node/ + api/
+       WinZapp.exe + lib/ + sounds/ + languages/ + data/ + .env + node/ + api/
   4. Compile uninstaller -> build/uninstall.exe
   5. Create payload ZIP (ZIP_STORED) from staging/ + uninstall.exe
   6. Compile installer stub -> build/installer_stub.exe
@@ -24,10 +24,10 @@ Visible structure after install / extraction:
 
 Before running this script you must prepare:
 
-  node/  - download the Windows x64 portable Node.js zip from
-           https://nodejs.org/dist/ (node-vXX.X.X-win-x64.zip)
-           and extract its contents into a 'node/' folder at the project root.
-           Verify: node/node.exe must exist.
+  client/node/  - download the Windows x64 portable Node.js zip from
+                  https://nodejs.org/dist/ (node-vXX.X.X-win-x64.zip)
+                  and extract its contents into client/node/ (inside the client folder).
+                  Verify: client/node/node.exe must exist.
 
   client/api/ - run setup_api.py to clone the Evolution API (honours the
                 EVOLUTION_TAG_VERSION variable in .env), then inside client/api/ run:
@@ -57,8 +57,8 @@ DIST_DIR      = os.path.join(ROOT_DIR, "dist")
 VENV_DIR      = os.path.join(ROOT_DIR, "venv")
 
 # External pre-built assets (developer prepares these once)
-NODE_DIR      = os.path.join(ROOT_DIR, "node")          # portable Node.js
-API_DIR       = os.path.join(ROOT_DIR, "client", "api") # Evolution API (set up via setup_api.py)
+NODE_DIR      = os.path.join(CLIENT_DIR, "node")        # portable Node.js (lives inside client/)
+API_DIR       = os.path.join(CLIENT_DIR, "api")         # Evolution API (set up via setup_api.py)
 
 NUITKA_CMD  = os.path.join(VENV_DIR, "Scripts", "nuitka.cmd")
 PYTHON_CMD  = os.path.join(VENV_DIR, "Scripts", "python.exe")
@@ -149,7 +149,7 @@ def check_tools():
     node_exe = os.path.join(NODE_DIR, "node.exe")
     if not os.path.isfile(node_exe):
         missing.append(
-            f"node/node.exe  (download portable Node.js for Windows x64 and "
+            f"client/node/node.exe  (download portable Node.js for Windows x64 and "
             f"extract to {NODE_DIR})"
         )
 
@@ -212,6 +212,7 @@ def nuitka_compile():
         "--include-package=socketio",
         "--include-package=engineio",
         "--include-package=pyperclip",
+        "--include-package=packaging",
         # Exclude BASS DLLs from the exe - they live in the external lib/ folder
         "--noinclude-dlls=bass*.dll",
         "--noinclude-dlls=tags.dll",
@@ -275,6 +276,14 @@ def assemble_staging():
     os.makedirs(data_dir)
     shutil.copy2(SETTINGS_DEFAULT, os.path.join(data_dir, "settings_default.json"))
     print(f"  -> data/settings_default.json")
+
+    # .env - WinZapp runtime configuration (EVOLUTION_API_MINIMUM_VERSION, update URLs, etc.)
+    client_env = os.path.join(CLIENT_DIR, ".env")
+    if os.path.isfile(client_env):
+        shutil.copy2(client_env, os.path.join(STAGING_DIR, ".env"))
+        print(f"  -> .env")
+    else:
+        print(f"  [WARN] client/.env not found — skipping (version check will be disabled at runtime)")
 
     # node/ - portable Node.js runtime
     node_dst = os.path.join(STAGING_DIR, "node")
