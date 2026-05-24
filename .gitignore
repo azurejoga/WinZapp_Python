@@ -30,6 +30,7 @@ client/logs/
 /client/api/instances/
 /client/api/store/
 /client/api/evolution.log
+/client/api2/
 
 # Build intermediates and distribution artefacts
 /build/
