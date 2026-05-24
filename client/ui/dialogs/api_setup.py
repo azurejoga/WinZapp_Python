@@ -60,17 +60,32 @@ _KEEP_RUNTIME = {"pgdata", "instances", "store", "evolution.log"}
 
 
 class ApiSetupDialog(wx.Dialog):
-    """Progress dialog for the full Evolution API download + build setup."""
+    """Progress dialog for the full Evolution API download + build setup.
+
+    Parameters
+    ----------
+    parent        : wx.Window
+    title_override: str | None
+        When provided, overrides the default hardcoded dialog title.
+        Used by the update flow to show a different title (e.g.
+        "WinZapp | Atualizando a Evolution API").
+    forced_tag    : str | None
+        When provided, this tag is used for the GitHub download instead
+        of reading EVOLUTION_TAG_VERSION from the .env file.  Used by
+        the update flow to pin the exact minimum-version tag.
+    """
 
     _PULSE_MS = 80
 
-    def __init__(self, parent):
-        title = "WinZapp | Instalando e configurando os módulos necessários para o funcionamento do programa"
+    def __init__(self, parent, title_override=None, forced_tag=None):
+        title = (title_override
+                 or "WinZapp | Instalando e configurando os módulos necessários para o funcionamento do programa")
         style = wx.DEFAULT_DIALOG_STYLE & ~wx.CLOSE_BOX
         super().__init__(parent, title=title, style=style)
 
-        self._proc      = None   # active npm subprocess (for kill on cancel)
-        self._cancelled = False
+        self._proc        = None   # active npm subprocess (for kill on cancel)
+        self._cancelled   = False
+        self._forced_tag  = forced_tag   # overrides .env EVOLUTION_TAG_VERSION
 
         self._build_ui()
 
@@ -280,7 +295,8 @@ class ApiSetupDialog(wx.Dialog):
         node_exe = resource_path("node", "node.exe")
         npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
         api_dir  = resource_path("api")
-        tag      = self._read_env_value("EVOLUTION_TAG_VERSION")
+        # forced_tag (from update flow) takes precedence over the .env value
+        tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("EVOLUTION_TAG_VERSION")
 
         try:
             # ── Step 1: download source ZIP ───────────────────────────────

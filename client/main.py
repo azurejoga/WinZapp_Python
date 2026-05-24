@@ -88,6 +88,9 @@ class MainWindow(wx.Frame):
         # Check and install API modules if needed (first run only)
         self.ensure_api_modules_installed()
 
+        # Check that the installed Evolution API meets the minimum required version
+        self.ensure_evolution_version()
+
         #Start local Evolution API (if bundled)
         self.evolution_process = None
         self.ensure_evolution_running()
@@ -490,6 +493,115 @@ class MainWindow(wx.Frame):
             dlg.Destroy()
 
         if result != wx.ID_OK:
+            sys.exit(0)
+
+    # ── Evolution API version gate ────────────────────────────────────────────
+
+    def _read_env_value(self, key: str, default: str = "") -> str:
+        """Read a value from the bundled client .env file."""
+        env_path = resource_path(".env")
+        try:
+            with open(env_path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == key:
+                        return v.strip()
+        except Exception:
+            pass
+        return default
+
+    def _get_installed_evolution_version(self) -> str:
+        """Read the Evolution API version from api/package.json."""
+        pkg_path = resource_path("api", "package.json")
+        try:
+            with open(pkg_path, encoding="utf-8") as fh:
+                import json as _json
+                pkg = _json.load(fh)
+            return pkg.get("version", "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _version_is_below(installed: str, minimum: str) -> bool:
+        """
+        Return True when *installed* is strictly older than *minimum*.
+        Handles standard semver and pre-release suffixes (e.g. "2.4.0-rc2").
+        Returns False on any parsing error so the check never blocks startup
+        due to an unexpected version string format.
+        """
+        if not installed or not minimum:
+            return False
+        try:
+            from packaging.version import Version
+            return Version(installed) < Version(minimum)
+        except Exception:
+            return False
+
+    def ensure_evolution_version(self):
+        """
+        Compare the installed Evolution API version against the minimum required
+        by this WinZapp build (EVOLUTION_API_MINIMUM_VERSION in client/.env).
+
+        If the installed version is older the user is prompted to:
+          • Update now   — re-download + rebuild via ApiSetupDialog, then continue
+          • Exit         — terminate WinZapp
+          • Continue     — proceed without updating (not recommended)
+
+        The check is skipped when:
+          - Running in background mode (no UI)
+          - api/package.json is absent (setup not done yet)
+          - EVOLUTION_API_MINIMUM_VERSION is not defined in the .env
+        """
+        if self.background_mode:
+            return
+
+        dist_main = resource_path("api", "dist", "main.js")
+        if not os.path.isfile(dist_main):
+            return  # API not installed yet — setup dialog will handle it
+
+        minimum  = self._read_env_value("EVOLUTION_API_MINIMUM_VERSION")
+        if not minimum:
+            return  # No minimum defined — nothing to check
+
+        installed = self._get_installed_evolution_version()
+        if not installed:
+            return  # Could not determine installed version — skip silently
+
+        if not self._version_is_below(installed, minimum):
+            return  # Installed version meets (or exceeds) the minimum — all good
+
+        # ── Installed version is older than the minimum ───────────────────────
+        from ui.dialogs.api_version_check import (
+            ApiVersionOutdatedDialog,
+            RESULT_UPDATE, RESULT_EXIT, RESULT_CONTINUE,
+        )
+
+        dlg    = ApiVersionOutdatedDialog(self, self.i18n, installed, minimum)
+        result = dlg.ShowModal()
+        dlg.Destroy()
+
+        if result == RESULT_EXIT:
+            sys.exit(0)
+
+        if result == RESULT_CONTINUE:
+            return  # Proceed with the outdated version — user's choice
+
+        # RESULT_UPDATE: re-download and rebuild using the minimum-version tag
+        from ui.dialogs.api_setup import ApiSetupDialog
+        update_dlg = ApiSetupDialog(
+            self,
+            title_override=self.i18n.t("api_update_dialog_title"),
+            forced_tag=minimum,
+        )
+        update_result = update_dlg.ShowModal()
+        update_dlg.Destroy()
+
+        if update_result != wx.ID_OK:
+            # Update was cancelled or failed — exit to avoid running an
+            # incompatible API version
             sys.exit(0)
 
     # ── Evolution API lifecycle ─────────────────────────────────────────────
