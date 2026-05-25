@@ -45,7 +45,7 @@ class WebSocketClient:
             self.main_window.error_sound.play()
             # Show error in the appropriate dialog
             parent_dialog = self.connect.pairing_dial if hasattr(self.connect, 'pairing_dial') else self.connect.connection_dial
-            wx.MessageBox(self.i18n.t("instance_state_changed"), self.i18n.t("error"), wx.OK | wx.ICON_ERROR, parent_dialog)
+            wx.MessageBox(self.i18n.t("instance_state_changed"), self.i18n.t("error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR, parent_dialog)
 
     def on_pairing_complete(self):
         #Saves the new user token in the data  directory
