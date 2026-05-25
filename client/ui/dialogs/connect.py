@@ -97,7 +97,7 @@ class Connect:
             "token":        token,
             "integration":  "WHATSAPP-BAILEYS",
             "qrcode":       False,
-            "syncFullHistory": False,
+            "syncFullHistory": True,
         }
         headers = self._evolution_headers(use_global_key=True)
 
