@@ -166,7 +166,8 @@ class Connect:
     def _setup_websocket_for_instance(self, token):
         """
         Enable and configure Socket.IO event delivery for this instance.
-        Uses the instance's own token as the API key (not the global key).
+        Uses the global api_key so this works both before and after license
+        activation (the licensed key replaces the default in evolution_api_key).
         Called once after creating an instance.
         """
         url = (
@@ -177,7 +178,7 @@ class Connect:
         try:
             requests.post(
                 url, json=payload,
-                headers=self._evolution_headers(),  # instance token, not global
+                headers=self._evolution_headers(use_global_key=True),
                 timeout=10,
             )
         except Exception:
