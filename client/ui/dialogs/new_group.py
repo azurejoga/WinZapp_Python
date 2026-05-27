@@ -1,9 +1,12 @@
 """
 new_group.py — WinZapp "Novo grupo" dialog.
 
-Lets the user create a new WhatsApp group with a name and a list of
-participant phone numbers (comma-separated).  Calls the Evolution API
-POST /group/create/{instance} endpoint.
+Lets the user create a new WhatsApp group by:
+  1. Choosing a group name.
+  2. Selecting participants from a saved-contact checklist.
+  3. Optionally adding an extra phone number not in the contacts list.
+
+Calls the Evolution API POST /group/create/{instance} endpoint.
 """
 
 import re
@@ -20,11 +23,12 @@ class NewGroupDialog(wx.Dialog):
         super().__init__(
             parent or main_window,
             title=i18n.t("new_group_title"),
-            style=wx.DEFAULT_DIALOG_STYLE,
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        self._contact_jids: list = []
         self._build_ui(i18n)
-        self.SetMinSize((420, -1))
-        self.Fit()
+        self.SetMinSize((440, 400))
+        self.SetSize((460, 520))
         self.CentreOnParent()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -34,19 +38,56 @@ class NewGroupDialog(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Group name
-        sizer.Add(wx.StaticText(panel, label=i18n.t("group_name")), 0,
-                  wx.LEFT | wx.TOP, 10)
+        sizer.Add(
+            wx.StaticText(panel, label=i18n.t("group_name")),
+            0, wx.LEFT | wx.TOP, 10,
+        )
         self._name_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
         sizer.Add(self._name_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
-        # Participants
-        sizer.Add(wx.StaticText(panel, label=i18n.t("group_participants_label")), 0,
-                  wx.LEFT | wx.TOP, 10)
-        self._participants_field = wx.TextCtrl(
-            panel, style=wx.TE_MULTILINE | wx.TE_DONTWRAP, size=(-1, 80)
+        # Participants checklist from saved contacts
+        sizer.Add(
+            wx.StaticText(panel, label=i18n.t("group_contacts_label")),
+            0, wx.LEFT | wx.TOP, 10,
         )
-        sizer.Add(self._participants_field, 0,
-                  wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+        contacts = self._mw.contacts
+        contact_labels = []
+        self._contact_jids = []
+        for jid, contact in contacts.items():
+            name = (
+                contact.get("name") or contact.get("fullName")
+                or contact.get("verifiedName") or contact.get("pushName")
+                or jid
+            )
+            contact_labels.append(name)
+            self._contact_jids.append(jid)
+
+        if contact_labels:
+            self._contacts_listbox = wx.CheckListBox(
+                panel, choices=contact_labels, style=wx.LB_NEEDED_SB,
+            )
+            sizer.Add(
+                self._contacts_listbox, 1,
+                wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10,
+            )
+        else:
+            no_contacts_label = wx.StaticText(
+                panel, label=i18n.t("group_no_contacts")
+            )
+            sizer.Add(no_contacts_label, 0, wx.LEFT | wx.TOP, 10)
+            self._contacts_listbox = None
+
+        # Extra phone number (for numbers not in contacts)
+        sizer.Add(
+            wx.StaticText(panel, label=i18n.t("group_extra_number_label")),
+            0, wx.LEFT | wx.TOP, 10,
+        )
+        self._extra_number_field = wx.TextCtrl(panel, style=wx.TE_DONTWRAP)
+        sizer.Add(
+            self._extra_number_field, 0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10,
+        )
 
         # Buttons
         btn_sizer = wx.StdDialogButtonSizer()
@@ -80,29 +121,49 @@ class NewGroupDialog(wx.Dialog):
             self._name_field.SetFocus()
             return
 
-        raw_parts = self._participants_field.GetValue()
-        # Accept comma or newline separated numbers
-        numbers = [
-            re.sub(r"\D", "", p.strip())
-            for p in re.split(r"[,\n]", raw_parts)
-        ]
-        numbers = [n for n in numbers if len(n) >= 7]
+        # Gather checked contacts
+        numbers: list = []
+        if self._contacts_listbox is not None:
+            for idx in range(self._contacts_listbox.GetCount()):
+                if self._contacts_listbox.IsChecked(idx):
+                    jid = self._contact_jids[idx]
+                    digits = re.sub(r"\D", "", jid.split("@")[0])
+                    if digits:
+                        numbers.append(digits)
 
-        if not numbers:
+        # Gather extra number field
+        extra_raw = self._extra_number_field.GetValue()
+        for part in re.split(r"[,\n]", extra_raw):
+            digits = re.sub(r"\D", "", part.strip())
+            if len(digits) >= 7:
+                numbers.append(digits)
+
+        # Deduplicate while preserving order
+        seen: set = set()
+        unique_numbers = []
+        for n in numbers:
+            if n not in seen:
+                seen.add(n)
+                unique_numbers.append(n)
+
+        if not unique_numbers:
             wx.MessageBox(
                 i18n.t("group_participants_label"),
                 i18n.t("app_name"),
                 wx.OK | wx.ICON_WARNING,
                 self,
             )
-            self._participants_field.SetFocus()
+            if self._contacts_listbox is not None:
+                self._contacts_listbox.SetFocus()
+            else:
+                self._extra_number_field.SetFocus()
             return
 
-        # Disable the OK button to prevent double-click
+        # Disable OK to prevent double-click
         self.FindWindow(wx.ID_OK).Disable()
 
         def _run():
-            ok, result = self._mw.create_group(name, numbers)
+            ok, result = self._mw.create_group(name, unique_numbers)
             wx.CallAfter(self._on_create_done, ok, result)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -111,7 +172,6 @@ class NewGroupDialog(wx.Dialog):
         i18n = self._mw.i18n
         if ok:
             self.EndModal(wx.ID_OK)
-            # Navigate to the new group if we have its JID
             if result and result.endswith("@g.us"):
                 mw   = self._mw
                 chat = mw.chats.get(result) or {"remoteJid": result}

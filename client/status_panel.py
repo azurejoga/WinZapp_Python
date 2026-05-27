@@ -272,12 +272,15 @@ class StatusPanel(wx.Panel):
         self._media_close_btn.Bind(wx.EVT_BUTTON, self._on_close_media_panel)
         media_sizer.Add(self._media_close_btn, 0, wx.ALL, 5)
 
-        self._media_file_label = wx.StaticText(self._media_post_panel, label="")
-        media_sizer.Add(self._media_file_label, 0, wx.LEFT | wx.TOP, 5)
+        # Dynamic list of "Remover anexo <filename>" buttons, rebuilt on every change
+        self._media_attachments_list_panel = wx.Panel(self._media_post_panel)
+        self._media_attachments_list_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._media_attachments_list_panel.SetSizer(self._media_attachments_list_sizer)
+        media_sizer.Add(self._media_attachments_list_panel, 0, wx.EXPAND | wx.LEFT | wx.TOP, 5)
 
-        self._media_choose_btn = wx.Button(self._media_post_panel, label=i18n.t("status_photos_videos"))
-        self._media_choose_btn.Bind(wx.EVT_BUTTON, self._on_choose_media_file)
-        media_sizer.Add(self._media_choose_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+        self._media_add_more_btn = wx.Button(self._media_post_panel, label=i18n.t("add_more_files"))
+        self._media_add_more_btn.Bind(wx.EVT_BUTTON, self._on_add_more_media_files)
+        media_sizer.Add(self._media_add_more_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
         self._media_caption_label = wx.StaticText(self._media_post_panel, label=i18n.t("status_caption_hint"))
         media_sizer.Add(self._media_caption_label, 0, wx.LEFT, 5)
@@ -294,7 +297,7 @@ class StatusPanel(wx.Panel):
         self._media_post_panel.Hide()
         sizer.Add(self._media_post_panel, 0, wx.EXPAND | wx.ALL, 5)
 
-        self._selected_media_path = None
+        self._selected_media_paths: list = []
 
         self.SetSizer(sizer)
 
@@ -717,13 +720,30 @@ class StatusPanel(wx.Panel):
         self._post_text_field.SetFocus()
 
     def _on_choose_media_status(self, event):
-        self._hide_post_panels()
-        self._media_post_panel.Show()
-        self._media_caption_field.SetValue("")
-        self._selected_media_path = None
-        self._media_file_label.SetLabel("")
-        self.Layout()
-        self._media_choose_btn.SetFocus()
+        i18n = self.main_window.i18n
+        wildcard = (
+            f"{i18n.t('status_photos_videos')} "
+            "(*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv)"
+            "|*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv"
+            f"|{i18n.t('attachment_document')} (*.*)|*.*"
+        )
+        dlg = wx.FileDialog(
+            self,
+            message=i18n.t("status_photos_videos"),
+            wildcard=wildcard,
+            style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST,
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            self._selected_media_paths = dlg.GetPaths()
+            dlg.Destroy()
+            self._hide_post_panels()
+            self._media_post_panel.Show()
+            self._media_caption_field.SetValue("")
+            self._rebuild_media_attachment_list()
+            self.Layout()
+            self._media_caption_field.SetFocus()
+        else:
+            dlg.Destroy()
 
     def _on_close_post_panel(self, event):
         self._post_panel.Hide()
@@ -731,6 +751,7 @@ class StatusPanel(wx.Panel):
         self._status_list.SetFocus()
 
     def _on_close_media_panel(self, event):
+        self._selected_media_paths = []
         self._media_post_panel.Hide()
         self.Layout()
         self._status_list.SetFocus()
@@ -785,33 +806,74 @@ class StatusPanel(wx.Panel):
 
     # ── Send media status ────────────────────────────────────────────────────
 
-    def _on_choose_media_file(self, event):
+    def _on_add_more_media_files(self, event):
+        i18n = self.main_window.i18n
+        wildcard = (
+            f"{i18n.t('status_photos_videos')} "
+            "(*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv)"
+            "|*.jpg;*.jpeg;*.png;*.gif;*.webp;*.mp4;*.avi;*.mov;*.mkv"
+            f"|{i18n.t('attachment_document')} (*.*)|*.*"
+        )
         dlg = wx.FileDialog(
             self,
-            wildcard=(
-                "Imagens e vídeos (*.jpg;*.jpeg;*.png;*.gif;*.mp4;*.mov)"
-                "|*.jpg;*.jpeg;*.png;*.gif;*.mp4;*.mov"
-                "|Todos os arquivos (*.*)|*.*"
-            ),
-            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+            message=i18n.t("status_photos_videos"),
+            wildcard=wildcard,
+            style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST,
         )
         if dlg.ShowModal() == wx.ID_OK:
-            self._selected_media_path = dlg.GetPath()
-            self._media_file_label.SetLabel(
-                os.path.basename(self._selected_media_path)
-            )
+            self._selected_media_paths.extend(dlg.GetPaths())
+            self._rebuild_media_attachment_list()
             self.Layout()
         dlg.Destroy()
 
+    def _rebuild_media_attachment_list(self):
+        """Rebuild the per-file remove-buttons to match _selected_media_paths."""
+        i18n  = self.main_window.i18n
+        panel = self._media_attachments_list_panel
+        sizer = self._media_attachments_list_sizer
+        for child in list(panel.GetChildren()):
+            child.Destroy()
+        sizer.Clear()
+        for path in self._selected_media_paths:
+            filename = os.path.basename(path)
+            btn = wx.Button(
+                panel,
+                label=f"{i18n.t('remove_attachment')} {filename}",
+            )
+            btn.Bind(
+                wx.EVT_BUTTON,
+                lambda evt, p=path: self._on_remove_media_attachment(p),
+            )
+            sizer.Add(btn, 0, wx.BOTTOM, 3)
+        panel.Layout()
+        if self._media_post_panel.IsShown():
+            self._media_post_panel.Layout()
+            self.Layout()
+
+    def _on_remove_media_attachment(self, path: str):
+        """Remove one selected file and rebuild the list (or close the panel)."""
+        self._selected_media_paths = [
+            p for p in self._selected_media_paths if p != path
+        ]
+        if not self._selected_media_paths:
+            self._on_close_media_panel(None)
+        else:
+            self._rebuild_media_attachment_list()
+
     def _on_send_media_status(self, event):
-        if not self._selected_media_path:
+        if not self._selected_media_paths:
             return
         caption = self._media_caption_field.GetValue().strip()
+        paths = list(self._selected_media_paths)
         threading.Thread(
-            target=self._send_media_status_bg,
-            args=(self._selected_media_path, caption),
+            target=self._send_all_media_statuses_bg,
+            args=(paths, caption),
             daemon=True,
         ).start()
+
+    def _send_all_media_statuses_bg(self, paths: list, caption: str):
+        for path in paths:
+            self._send_media_status_bg(path, caption)
 
     def _send_media_status_bg(self, path: str, caption: str):
         mw = self.main_window
@@ -892,7 +954,7 @@ class StatusPanel(wx.Panel):
         self._post_send_btn.SetLabel(i18n.t("status_send"))
         self._post_text_label.SetLabel(i18n.t("status_text_label"))
         self._media_send_btn.SetLabel(i18n.t("status_send"))
-        self._media_choose_btn.SetLabel(i18n.t("status_photos_videos"))
+        self._media_add_more_btn.SetLabel(i18n.t("add_more_files"))
         self._post_close_btn.SetLabel(i18n.t("close"))
         self._media_close_btn.SetLabel(i18n.t("close"))
 

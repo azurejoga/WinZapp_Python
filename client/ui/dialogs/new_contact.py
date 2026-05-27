@@ -110,6 +110,9 @@ class NewContactDialog(wx.Dialog):
             "pushName":   full_name,
         }
 
+        # Persist to disk so the contact survives restarts
+        self._mw.save_data(self._mw.chats, self._mw.contacts)
+
         self.result_jid  = jid
         self.result_name = full_name
         self.EndModal(wx.ID_OK)

@@ -1097,6 +1097,7 @@ class MainWindow(wx.Frame):
             sys.exit()
 
     def prepare_sync(self):
+        os.makedirs(data_path(), exist_ok=True)
         self.generate_secret_key()
         self.key = self.retrieve_secret_key()
         self.create_basic_files()
@@ -1183,7 +1184,7 @@ class MainWindow(wx.Frame):
                     return []
         except Exception as e:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(f"{self.i18n.t('chat_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             return []
 
     def get_remote_chats(self, chats):
@@ -1205,7 +1206,7 @@ class MainWindow(wx.Frame):
             return chats
         except Exception as e:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('chat_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
+            wx.MessageBox(f"{self.i18n.t('chat_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
 
     def normalize_chats(self, chats):
         for key, chat in chats.items():
@@ -1223,7 +1224,7 @@ class MainWindow(wx.Frame):
                 f.write(encrypted_data)
         except Exception as e:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('data_save_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(f"{self.i18n.t('data_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
 
     def get_contacts(self):
         messages_file = data_path("messages.dat")
@@ -1237,7 +1238,7 @@ class MainWindow(wx.Frame):
                     return {}
         except Exception as e:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('contact_load_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(f"{self.i18n.t('contact_load_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             return {}
 
     def get_remote_contacts(self):
@@ -1257,7 +1258,7 @@ class MainWindow(wx.Frame):
             return contacts
         except Exception as e:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR, self)
+            wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
 
     def set_chats(self):
         deleted  = set(self.settings.get("deleted_chats",  []))

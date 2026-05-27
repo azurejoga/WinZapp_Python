@@ -113,8 +113,8 @@ class SettingsDialog(wx.Dialog):
 
         # ── Button row ───────────────────────────────────────────────────────
         btn_sizer = wx.StdDialogButtonSizer()
-        self._ok_btn = wx.Button(self, wx.ID_OK)
-        self._cancel_btn = wx.Button(self, wx.ID_CANCEL)
+        self._ok_btn = wx.Button(self, wx.ID_OK, label=i18n.t("ok"))
+        self._cancel_btn = wx.Button(self, wx.ID_CANCEL, label=i18n.t("cancel"))
         self._apply_btn = wx.Button(self, wx.ID_APPLY, label=i18n.t("apply"))
         btn_sizer.AddButton(self._ok_btn)
         btn_sizer.AddButton(self._cancel_btn)
@@ -282,6 +282,8 @@ class SettingsDialog(wx.Dialog):
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
+        self._ok_btn.SetLabel(i18n.t("ok"))
+        self._cancel_btn.SetLabel(i18n.t("cancel"))
         self._apply_btn.SetLabel(i18n.t("apply"))
         self._audio_speed_label.SetLabel(i18n.t("audio_speed_label"))
         # Regenerate speed labels — decimal separator may have changed with language

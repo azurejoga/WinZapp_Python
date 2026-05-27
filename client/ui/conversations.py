@@ -342,8 +342,17 @@ class ConversationsPanel(wx.Panel):
         self._attachment_panel = wx.Panel(self.conversation_panel)
         attach_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self._files_selected_label = wx.StaticText(self._attachment_panel, label="")
-        attach_sizer.Add(self._files_selected_label, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+        # Dynamic list of "Remover anexo <filename>" buttons, rebuilt on every change
+        self._attachments_list_panel = wx.Panel(self._attachment_panel)
+        self._attachments_list_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._attachments_list_panel.SetSizer(self._attachments_list_sizer)
+        attach_sizer.Add(self._attachments_list_panel, 0, wx.EXPAND | wx.LEFT | wx.TOP, 5)
+
+        self._add_more_btn = wx.Button(
+            self._attachment_panel, label=i18n.t("add_more_files")
+        )
+        self._add_more_btn.Bind(wx.EVT_BUTTON, self._on_add_more_files)
+        attach_sizer.Add(self._add_more_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
         self._caption_field = wx.TextCtrl(
             self._attachment_panel,
@@ -352,12 +361,6 @@ class ConversationsPanel(wx.Panel):
         self._caption_field.SetHint(i18n.t("attachment_caption_hint"))
         self._caption_field.Bind(wx.EVT_TEXT_ENTER, self._on_send_attachment)
         attach_sizer.Add(self._caption_field, 0, wx.EXPAND | wx.ALL, 5)
-
-        self._add_more_btn = wx.Button(
-            self._attachment_panel, label=i18n.t("add_more_files")
-        )
-        self._add_more_btn.Bind(wx.EVT_BUTTON, self._on_add_more_files)
-        attach_sizer.Add(self._add_more_btn, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self._send_attachment_btn = wx.Button(
             self._attachment_panel, label=i18n.t("send_attachment")
@@ -3139,10 +3142,7 @@ class ConversationsPanel(wx.Panel):
         self._on_cancel_reply()  # clear quoted state after send
 
     def _show_attachment_panel(self):
-        count = len(self._staged_attachments)
-        self._files_selected_label.SetLabel(
-            self.main_window.i18n.t("files_selected").format(count=count)
-        )
+        self._rebuild_attachment_list()
         self.message_label.Hide()
         self.message_field.Hide()
         self.send_message_btn.Hide()
@@ -3151,6 +3151,40 @@ class ConversationsPanel(wx.Panel):
         self._attachment_panel.Show()
         self.conversation_panel.Layout()
         self._caption_field.SetFocus()
+
+    def _rebuild_attachment_list(self):
+        """Rebuild the per-file remove-buttons to match _staged_attachments."""
+        i18n  = self.main_window.i18n
+        panel = self._attachments_list_panel
+        sizer = self._attachments_list_sizer
+        for child in list(panel.GetChildren()):
+            child.Destroy()
+        sizer.Clear()
+        for att in self._staged_attachments:
+            filename = os.path.basename(att["path"])
+            btn = wx.Button(
+                panel,
+                label=f"{i18n.t('remove_attachment')} {filename}",
+            )
+            btn.Bind(
+                wx.EVT_BUTTON,
+                lambda evt, p=att["path"]: self._on_remove_attachment(p),
+            )
+            sizer.Add(btn, 0, wx.BOTTOM, 3)
+        panel.Layout()
+        if self._attachment_panel.IsShown():
+            self._attachment_panel.Layout()
+            self.conversation_panel.Layout()
+
+    def _on_remove_attachment(self, path: str):
+        """Remove one staged file and rebuild the list (or close the panel)."""
+        self._staged_attachments = [
+            a for a in self._staged_attachments if a["path"] != path
+        ]
+        if not self._staged_attachments:
+            self._hide_attachment_panel()
+        else:
+            self._rebuild_attachment_list()
 
     def _hide_attachment_panel(self):
         self._staged_attachments = []

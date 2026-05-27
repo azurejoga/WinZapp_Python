@@ -55,7 +55,7 @@ class ShortcutsDialog(wx.Dialog):
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(panel, 1, wx.EXPAND)
         self.SetSizer(outer)
-        self.SetSize((520, 420))
+        self.SetSize((520, 520))
         self.CenterOnParent()
 
         self._text_ctrl.SetFocus()
@@ -80,7 +80,20 @@ class ShortcutsDialog(wx.Dialog):
             section("shortcuts_conv_section"),
             i18n.t("shortcut_alt2_label"),
             i18n.t("shortcut_alt3_label"),
+            i18n.t("shortcut_ctrl_r_label"),
+            i18n.t("shortcut_esc_ctrl_w_label"),
+            i18n.t("shortcut_ctrl_shift_j_label"),
+            i18n.t("shortcut_ctrl_shift_d_label"),
             i18n.t("shortcut_ctrl_shift_f_label"),
+            i18n.t("shortcut_alt_r_label"),
+            i18n.t("shortcut_ctrl_shift_e_label"),
+            i18n.t("shortcut_ctrl_shift_p_label"),
+            i18n.t("shortcut_ctrl_c_label"),
+            i18n.t("shortcut_alt_c_label"),
+            i18n.t("shortcut_ctrl_shift_s_label"),
+            i18n.t("shortcut_ctrl_shift_m_label"),
+            i18n.t("shortcut_ctrl_shift_b_label"),
+            i18n.t("shortcut_alt_shift_d_label"),
             i18n.t("shortcut_alt_shift_r_label"),
             i18n.t("shortcut_alt_shift_c_label"),
             i18n.t("shortcut_alt_shift_v_label"),

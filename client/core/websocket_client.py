@@ -53,7 +53,7 @@ class WebSocketClient:
             self.save_token(self.instance_name)
         except Exception as e:
             self.main_window.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('token_save_failed')} {format_exc()}", self.i18n.t("error"), wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(f"{self.i18n.t('token_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
 
         # Close pairing dialog if it exists (phone mode)
