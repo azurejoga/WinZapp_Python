@@ -79,6 +79,34 @@ class SettingsDialog(wx.Dialog):
         self._general_page.SetSizer(gen_sizer)
         self._notebook.AddPage(self._general_page, i18n.t("tab_general"))
 
+        # ── User Interface tab ───────────────────────────────────────────────
+        self._ui_page = wx.Panel(self._notebook)
+        ui_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        ui_sizer.Add(
+            wx.StaticText(self._ui_page, label=i18n.t("ui_messages_page_size_label")),
+            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        )
+        self._messages_page_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
+        ui_sizer.Add(self._messages_page_size_field, 0, wx.EXPAND | wx.ALL, 8)
+
+        ui_sizer.Add(
+            wx.StaticText(self._ui_page, label=i18n.t("ui_focus_label")),
+            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        )
+        self._focus_message_field_rb = wx.RadioButton(
+            self._ui_page, label=i18n.t("ui_focus_message_field"), style=wx.RB_GROUP
+        )
+        ui_sizer.Add(self._focus_message_field_rb, 0, wx.LEFT | wx.TOP, 8)
+
+        self._focus_unread_or_last_rb = wx.RadioButton(
+            self._ui_page, label=i18n.t("ui_focus_unread_or_last")
+        )
+        ui_sizer.Add(self._focus_unread_or_last_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 8)
+
+        self._ui_page.SetSizer(ui_sizer)
+        self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
+
         # ── Connection tab ───────────────────────────────────────────────────
         self._conn_page = wx.Panel(self._notebook)
         conn_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -155,6 +183,15 @@ class SettingsDialog(wx.Dialog):
         updates = self.main_window.settings.get("general", {}).get("updates_enabled", True)
         self._updates_check.SetValue(updates)
 
+        page_size = self.main_window.settings.get("ui", {}).get("messages_page_size", 50)
+        self._messages_page_size_field.SetValue(str(page_size))
+
+        focus_on_open = self.main_window.settings.get("ui", {}).get("focus_on_open", "message_field")
+        if focus_on_open == "unread_or_last":
+            self._focus_unread_or_last_rb.SetValue(True)
+        else:
+            self._focus_message_field_rb.SetValue(True)
+
         self._port_field.SetValue(str(self.main_window.evolution_port))
 
         saved_speed = self.main_window.settings.get("general", {}).get("audio_default_speed", 1.0)
@@ -165,7 +202,22 @@ class SettingsDialog(wx.Dialog):
         self._audio_speed_combo.SetSelection(speed_idx)
 
     def _validate(self) -> bool:
-        """Return True if the port value is valid; show an error and return False otherwise."""
+        """Return True if all values are valid; show an error and return False otherwise."""
+        page_size_str = self._messages_page_size_field.GetValue().strip()
+        try:
+            page_size = int(page_size_str)
+            if page_size < 1:
+                raise ValueError
+        except ValueError:
+            wx.MessageBox(
+                self.main_window.i18n.t("invalid_messages_page_size"),
+                self.main_window.i18n.t("error").format(app_name=self.main_window.app_name),
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._messages_page_size_field.SetFocus()
+            return False
+
         port_str = self._port_field.GetValue().strip()
         try:
             port = int(port_str)
@@ -191,6 +243,17 @@ class SettingsDialog(wx.Dialog):
         sel = self._lang_combo.GetSelection()
         new_lang = self._lang_codes[sel] if sel != wx.NOT_FOUND else "pt-BR"
         self.main_window.settings.setdefault("general", {})["language"] = new_lang
+
+        # UI: messages page size
+        page_size = int(self._messages_page_size_field.GetValue().strip())
+        self.main_window.settings.setdefault("ui", {})["messages_page_size"] = page_size
+
+        # UI: focus on open
+        focus_on_open = (
+            "unread_or_last" if self._focus_unread_or_last_rb.GetValue()
+            else "message_field"
+        )
+        self.main_window.settings.setdefault("ui", {})["focus_on_open"] = focus_on_open
 
         # Port
         port = int(self._port_field.GetValue().strip())
@@ -275,13 +338,16 @@ class SettingsDialog(wx.Dialog):
         i18n = self.main_window.i18n
         self.SetTitle(i18n.t("settings_title"))
         self._notebook.SetPageText(0, i18n.t("tab_general"))
-        self._notebook.SetPageText(1, i18n.t("tab_connection"))
-        self._notebook.SetPageText(2, i18n.t("tab_audio_playback"))
+        self._notebook.SetPageText(1, i18n.t("tab_ui"))
+        self._notebook.SetPageText(2, i18n.t("tab_connection"))
+        self._notebook.SetPageText(3, i18n.t("tab_audio_playback"))
         self._sounds_check.SetLabel(i18n.t("sounds_label"))
         self._notifications_check.SetLabel(i18n.t("notifications_label"))
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
+        self._focus_message_field_rb.SetLabel(i18n.t("ui_focus_message_field"))
+        self._focus_unread_or_last_rb.SetLabel(i18n.t("ui_focus_unread_or_last"))
         self._ok_btn.SetLabel(i18n.t("ok"))
         self._cancel_btn.SetLabel(i18n.t("cancel"))
         self._apply_btn.SetLabel(i18n.t("apply"))

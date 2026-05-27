@@ -58,9 +58,15 @@ class NewGroupDialog(wx.Dialog):
             0, wx.LEFT | wx.TOP, 10,
         )
 
-        # Build the full contact list
+        # Build the contact list from chats the user actually has (not from
+        # all participants of external groups, which bloats the list).
+        known_jids = {
+            jid for jid in self._mw.chats
+            if not jid.endswith("@g.us") and not jid.endswith("@broadcast")
+        }
         contacts = self._mw.contacts
-        for jid, contact in contacts.items():
+        for jid in known_jids:
+            contact = contacts.get(jid, {})
             name = (
                 contact.get("name") or contact.get("fullName")
                 or contact.get("verifiedName") or contact.get("pushName")

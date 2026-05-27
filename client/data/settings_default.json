@@ -18,5 +18,9 @@
     },
     "status": {
         "messages_set_completed": false
+    },
+    "ui": {
+        "messages_page_size": 50,
+        "focus_on_open": "message_field"
     }
 }

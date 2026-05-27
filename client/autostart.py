@@ -30,13 +30,14 @@ def get_autostart_command() -> str:
     * Compiled (Nuitka/PyInstaller): ``"WinZapp.exe" --background``
     * Development:                   ``"python.exe" "main.py" --background``
     """
-    if getattr(sys, "frozen", False):
-        # Compiled executable — sys.executable IS the app binary
-        return f'"{sys.executable}" --background'
+    argv0 = os.path.abspath(sys.argv[0])
+    # Detect compiled binary: sys.frozen is set by PyInstaller/cx_Freeze,
+    # or argv[0] itself is an .exe (Nuitka standalone).
+    if getattr(sys, "frozen", False) or argv0.lower().endswith(".exe"):
+        return f'"{argv0}" --background'
     else:
-        # Source-code run — sys.executable is the Python interpreter
-        main_script = os.path.abspath(sys.argv[0])
-        return f'"{sys.executable}" "{main_script}" --background'
+        # Source-code run — interpreter + script
+        return f'"{sys.executable}" "{argv0}" --background'
 
 
 # ── Registry helpers ──────────────────────────────────────────────────────────

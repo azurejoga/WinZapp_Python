@@ -113,6 +113,14 @@ class ConversationsPanel(wx.Panel):
         # URLs found in the currently focused message
         self._current_links: list = []
 
+        # ── Lazy-loading / pagination state ─────────────────────────────────
+        # Full sorted+displayable list (never paginated)
+        self._all_sorted_messages: list = []
+        # How many messages from _all_sorted_messages are before _sorted_messages[0]
+        self._messages_offset: int = 0
+        # Guard to prevent recursive load-more triggers during list rebuild
+        self._is_loading_more: bool = False
+
         self.init_UI()
         self.create_accelerator_table()
         self.create_accel_conversation()
@@ -123,9 +131,24 @@ class ConversationsPanel(wx.Panel):
         i18n = self.main_window.i18n
         outer_sizer = wx.BoxSizer(wx.VERTICAL)
 
+        # ── Search ──────────────────────────────────────────────────────────
+        self.search_label = wx.StaticText(self, label=i18n.t("search_conversations"))
+        outer_sizer.Add(self.search_label, 0, wx.LEFT | wx.TOP, 5)
+
+        self.search_field = wx.TextCtrl(self, style=wx.TE_DONTWRAP)
+        self.search_field.Bind(wx.EVT_TEXT, self.on_search_query_changed)
+        self.search_field.SetAccessible(AccessibleSearchConversations("Ctrl+F"))
+        outer_sizer.Add(self.search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
+
+        # ── Nova conversa button ────────────────────────────────────────────
+        self._new_conv_btn = wx.Button(self, label=i18n.t("new_conversation"))
+        self._new_conv_btn.SetAccessible(AccessibleNewConversationButton())
+        self._new_conv_btn.Bind(wx.EVT_BUTTON, self._on_new_conversation)
+        outer_sizer.Add(self._new_conv_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 5)
+
         # ── Conversations list ──────────────────────────────────────────────
         self.conversations_label = wx.StaticText(self, label=i18n.t("conversations"))
-        outer_sizer.Add(self.conversations_label, 0, wx.LEFT | wx.TOP, 5)
+        outer_sizer.Add(self.conversations_label, 0, wx.LEFT, 5)
 
         self.conversations_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.conversations_list.InsertColumn(0, i18n.t("conversations"), width=200)
@@ -133,21 +156,6 @@ class ConversationsPanel(wx.Panel):
         self.conversations_list.Bind(wx.EVT_CONTEXT_MENU, self.on_conversations_context_menu)
         self.conversations_list.Bind(wx.EVT_KEY_DOWN, self._on_conv_list_key_down)
         outer_sizer.Add(self.conversations_list, 1, wx.EXPAND | wx.ALL, 5)
-
-        # ── Search ──────────────────────────────────────────────────────────
-        self.search_label = wx.StaticText(self, label=i18n.t("search_conversations"))
-        outer_sizer.Add(self.search_label, 0, wx.LEFT, 5)
-
-        self.search_field = wx.TextCtrl(self, style=wx.TE_DONTWRAP)
-        self.search_field.Bind(wx.EVT_TEXT, self.on_search_query_changed)
-        self.search_field.SetAccessible(AccessibleSearchConversations("Ctrl+F"))
-        outer_sizer.Add(self.search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
-
-        # ── Nova conversa button ────────────────────────────────────────────
-        self._new_conv_btn = wx.Button(self, label=i18n.t("new_conversation"))
-        self._new_conv_btn.SetAccessible(AccessibleNewConversationButton())
-        self._new_conv_btn.Bind(wx.EVT_BUTTON, self._on_new_conversation)
-        outer_sizer.Add(self._new_conv_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         # ── Conversation panel ──────────────────────────────────────────────
         self.conversation_panel = wx.Panel(self)
@@ -218,6 +226,7 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.InsertColumn(0, i18n.t("messages"), width=360)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_message_activated)
         self.messages_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
+        self.messages_list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_message_focused)
         self.messages_list.Bind(wx.EVT_CONTEXT_MENU, self.on_messages_context_menu)
         self.messages_list.Bind(wx.EVT_KEY_DOWN, self._on_messages_list_key_down)
         conv_sizer.Add(self.messages_list, 1, wx.EXPAND | wx.ALL, 5)
@@ -354,6 +363,11 @@ class ConversationsPanel(wx.Panel):
         )
         self._add_more_btn.Bind(wx.EVT_BUTTON, self._on_add_more_files)
         attach_sizer.Add(self._add_more_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+
+        self._caption_label = wx.StaticText(
+            self._attachment_panel, label=i18n.t("attachment_caption_hint")
+        )
+        attach_sizer.Add(self._caption_label, 0, wx.LEFT | wx.TOP, 5)
 
         self._caption_field = wx.TextCtrl(
             self._attachment_panel,
@@ -551,7 +565,6 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Show()
         self.Layout()
         self.preselect_messages()
-        self.message_field.SetFocus()
         threading.Thread(
             target=self.main_window.mark_conversation_as_read,
             args=(jid,),
@@ -566,6 +579,20 @@ class ConversationsPanel(wx.Panel):
         if self.search_field.GetValue().strip():
             self.search_field.Clear()
         self.populate_messages()
+
+        # Set focus based on user preference
+        focus_setting = self.main_window.settings.get("ui", {}).get("focus_on_open", "message_field")
+        if focus_setting == "unread_or_last":
+            if self._unread_sep_idx < 0:
+                # No unread separator — focus on last message
+                last = self.messages_list.GetItemCount() - 1
+                if last >= 0:
+                    self.messages_list.Focus(last)
+                    self.messages_list.Select(last, True)
+                    self.messages_list.EnsureVisible(last)
+            # else: populate_messages already made the separator visible
+        else:
+            self.message_field.SetFocus()
 
     def preselect_messages(self):
         self.messages_list.Focus(0)
@@ -654,6 +681,7 @@ class ConversationsPanel(wx.Panel):
         self.record_voice_message_btn.SetLabel(i18n.t("record_voice_message"))
         self._add_attachment_btn.SetLabel(i18n.t("add_attachment"))
         self._add_more_btn.SetLabel(i18n.t("add_more_files"))
+        self._caption_label.SetLabel(i18n.t("attachment_caption_hint"))
         self._send_attachment_btn.SetLabel(i18n.t("send_attachment"))
         self._contact_converse_btn.SetLabel(i18n.t("converse"))
         self._discard_voice_btn.SetLabel(i18n.t("discard_voice_message"))
@@ -1483,11 +1511,12 @@ class ConversationsPanel(wx.Panel):
         i18n = self.main_window.i18n
 
         for url in links:
-            ctrl = wx.HyperlinkCtrl(
+            ctrl = wx.adv.HyperlinkCtrl(
                 self._links_panel,
+                id=wx.ID_ANY,
                 label=url,
                 url=url,
-                style=wx.HL_DEFAULT_STYLE,
+                style=wx.adv.HL_DEFAULT_STYLE,
             )
             ctrl.Bind(wx.EVT_HYPERLINK, self._on_hyperlink_open)
             ctrl.Bind(wx.EVT_KEY_DOWN,  self._on_link_key_down)
@@ -1517,6 +1546,49 @@ class ConversationsPanel(wx.Panel):
                 wx.LaunchDefaultBrowser(ctrl.GetURL())
         else:
             event.Skip()
+
+    # ── Lazy-loading: load older messages when the user focuses item 0 ─────────
+
+    def _on_message_focused(self, event):
+        if (
+            event.GetIndex() == 0
+            and self._messages_offset > 0
+            and not self._is_loading_more
+        ):
+            self._load_more_messages()
+        event.Skip()
+
+    def _load_more_messages(self):
+        """Prepend the previous page of messages to the list."""
+        self._is_loading_more = True
+        try:
+            limit = int(
+                self.main_window.settings.get("ui", {}).get("messages_page_size", 50)
+            )
+            new_start = max(0, self._messages_offset - limit)
+            new_msgs  = self._all_sorted_messages[new_start:self._messages_offset]
+            if not new_msgs:
+                return
+
+            n_new = len(new_msgs)
+
+            # Extend the in-memory list and update the offset
+            self._sorted_messages   = new_msgs + self._sorted_messages
+            self._messages_offset   = new_start
+            if self._unread_sep_idx >= 0:
+                self._unread_sep_idx += n_new
+
+            # Rebuild the wx.ListCtrl from the updated _sorted_messages
+            self.messages_list.DeleteAllItems()
+            for msg in self._sorted_messages:
+                self.messages_list.Append((self._render_message_line(msg),))
+
+            # Keep the previously-first item in view (now at index n_new)
+            self.messages_list.Focus(n_new)
+            self.messages_list.Select(n_new, True)
+            self.messages_list.EnsureVisible(n_new)
+        finally:
+            self._is_loading_more = False
 
     # ── Keyboard Space-as-activate helpers ──────────────────────────────────
 
@@ -3541,16 +3613,32 @@ class ConversationsPanel(wx.Panel):
             displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
             self._unread_sep_idx = sep_pos
 
-        self._sorted_messages = displayable
+        # ── Pagination: show only last N messages ────────────────────────────
+        self._all_sorted_messages = displayable
+        limit = int(
+            self.main_window.settings.get("ui", {}).get("messages_page_size", 50)
+        )
+        if len(displayable) > limit:
+            self._messages_offset = len(displayable) - limit
+            paginated = displayable[self._messages_offset:]
+            if self._unread_sep_idx >= 0:
+                self._unread_sep_idx -= self._messages_offset
+                if self._unread_sep_idx < 0:
+                    self._unread_sep_idx = -1
+        else:
+            self._messages_offset = 0
+            paginated = displayable
 
-        for msg in displayable:
+        self._sorted_messages = paginated
+
+        for msg in paginated:
             self.messages_list.Append((self._render_message_line(msg),))
 
-        # Focus the separator when opening a conversation with unreads
+        # Make the unread separator visible (focus is set by navigate_to_conversation)
         if self._unread_sep_idx >= 0:
+            self.messages_list.EnsureVisible(self._unread_sep_idx)
             self.messages_list.Focus(self._unread_sep_idx)
             self.messages_list.Select(self._unread_sep_idx)
-            self.messages_list.EnsureVisible(self._unread_sep_idx)
 
 
 # ── Archived Conversations Panel ─────────────────────────────────────────────

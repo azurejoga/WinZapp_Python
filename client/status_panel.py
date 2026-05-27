@@ -182,10 +182,6 @@ class StatusPanel(wx.Panel):
         self._add_status_btn.Bind(wx.EVT_BUTTON, self._on_add_status)
         sizer.Add(self._add_status_btn, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
-        self._refresh_btn = wx.Button(self, label=i18n.t("status_refresh"))
-        self._refresh_btn.Bind(wx.EVT_BUTTON, self._on_refresh)
-        sizer.Add(self._refresh_btn, 0, wx.LEFT | wx.BOTTOM, 5)
-
         # ── Status contacts list ──────────────────────────────────────────
         self._list_label = wx.StaticText(self, label=i18n.t("status"))
         sizer.Add(self._list_label, 0, wx.LEFT | wx.TOP, 5)
@@ -357,19 +353,27 @@ class StatusPanel(wx.Panel):
         else:
             return my_statuses, contacts
 
-        grouped = {}
+        # Group by participant JID (use participant over remoteJid for
+        # status@broadcast entries, which is how WhatsApp encodes them).
+        grouped: dict = {}
         for item in items:
             key = item.get("key", {})
             if key.get("fromMe", False):
                 my_statuses.append(item)
                 continue
-            jid = key.get("remoteJid", "") or key.get("participant", "")
-            if not jid:
+            remote_jid  = key.get("remoteJid", "")
+            participant = key.get("participant", "")
+            # status@broadcast is the channel; real sender is in participant
+            if remote_jid == "status@broadcast" and participant:
+                jid = participant
+            else:
+                jid = remote_jid or participant
+            if not jid or jid == "status@broadcast":
                 continue
             name = self._resolve_name(jid) or format_number(jid)
-            if name not in grouped:
-                grouped[name] = {"name": name, "jid": jid, "statuses": []}
-            grouped[name]["statuses"].append(item)
+            if jid not in grouped:
+                grouped[jid] = {"name": name, "jid": jid, "statuses": []}
+            grouped[jid]["statuses"].append(item)
 
         for entry in grouped.values():
             contacts.append(entry)
@@ -936,7 +940,6 @@ class StatusPanel(wx.Panel):
         self._status_list.SetColumn(0, col)
 
         self._add_status_btn.SetLabel(i18n.t("status_add"))
-        self._refresh_btn.SetLabel(i18n.t("status_refresh"))
         self._prev_status_btn.SetLabel(i18n.t("status_prev"))
         self._next_status_btn.SetLabel(i18n.t("status_next"))
         self._play_pause_btn.SetLabel(i18n.t("status_play_pause"))

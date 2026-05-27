@@ -344,5 +344,11 @@
     "api_update_continue": "&Continuar con la versión actual de la API (no recomendado)",
     "api_update_dialog_title": "WinZapp | Actualizando Evolution API",
     "tab_audio_playback": "Reproducción de audio",
-    "audio_speed_label": "&Velocidad de reproducción de audio predeterminada"
+    "audio_speed_label": "&Velocidad de reproducción de audio predeterminada",
+    "tab_ui": "Interfaz de usuario",
+    "ui_messages_page_size_label": "Al abrir una conversación, mostrar número de mensajes hasta:",
+    "ui_focus_label": "Al abrir una conversación, enfocar:",
+    "ui_focus_message_field": "Campo de mensaje (predeterminado)",
+    "ui_focus_unread_or_last": "Indicador de mensajes no leídos o último mensaje",
+    "invalid_messages_page_size": "El número de mensajes por página debe ser un entero positivo."
 }
