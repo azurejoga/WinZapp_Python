@@ -60,10 +60,18 @@ async function main() {
     password:    PG_PASS,
     port:        PG_PORT,
     persistent:  true,   // data survives process restarts
-    // Force UTF-8 on first-time cluster initialisation.
-    // Without this, initdb on Windows defaults to WIN1252 and Postgres cannot
-    // store emoji / multibyte characters (error code 22P05).
-    initdbFlags: ['--encoding=UTF8'],
+    // Force UTF-8 encoding and C locale on first-time cluster initialisation.
+    //
+    // --encoding=UTF8  : store all data in UTF-8 (avoids error 22P05 on emoji).
+    // --locale=C       : use the C/POSIX locale instead of the system locale
+    //                    (e.g. Portuguese_Brazil.1252 / CP1252).  This prevents
+    //                    an ACCESS_VIOLATION (0xC0000005) crash that occurs
+    //                    during initdb's "performing post-bootstrap initialization"
+    //                    phase on Windows systems whose libc locale routines
+    //                    are called with a non-UTF-8 code page.  Safe to use
+    //                    because the application database is created explicitly
+    //                    with LC_COLLATE='C' and LC_CTYPE='C' anyway.
+    initdbFlags: ['--encoding=UTF8', '--locale=C'],
   });
 
   // pg.initialise() runs initdb, which fails if pgdata already exists.
