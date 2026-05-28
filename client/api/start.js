@@ -47,28 +47,87 @@ process.env.SERVER_TYPE             = 'http';
 async function main() {
   // ── 1. Start embedded PostgreSQL ─────────────────────────────────────────
 
-  // ── Version guard ─────────────────────────────────────────────────────────
-  // PostgreSQL 18 beta (embedded-postgres@18.x.x-beta.xx) enables data page
-  // checksums by default for the first time.  Its checksum code crashes with
-  // ACCESS_VIOLATION (0xC0000005) during initdb post-bootstrap initialization
-  // on certain Windows machines.  If a beta version is detected, emit a clear
-  // error and ask the user to reinstall rather than crashing silently.
-  try {
-    const epPkgPath = path.join(API_DIR, 'node_modules', 'embedded-postgres', 'package.json');
-    const epPkg = JSON.parse(fs.readFileSync(epPkgPath, 'utf-8'));
-    const epVersion = epPkg.version || '';
-    if (epVersion.toLowerCase().includes('beta') || epVersion.toLowerCase().includes('alpha') || epVersion.toLowerCase().includes('rc')) {
-      console.error(
-        `[WinZapp] ERRO: versão instável do PostgreSQL detectada (embedded-postgres@${epVersion}).\n` +
-        `Esta versão beta pode causar falhas (ACCESS_VIOLATION 0xC0000005) durante a\n` +
-        `inicialização do banco de dados em algumas máquinas Windows.\n` +
-        `Solução: feche o WinZapp, delete a pasta "api\\node_modules" e execute o WinZapp\n` +
-        `novamente para reinstalar os módulos com a versão estável.`
-      );
-      process.exit(1);
+  // ── Auto-upgrade unstable embedded-postgres ───────────────────────────────
+  // The distribution ZIP bundles api/node_modules as-is from the build machine.
+  // If that snapshot captured a beta/alpha/rc release of embedded-postgres
+  // (e.g. 18.3.0-beta.17), PostgreSQL 18's new default of enabling data-page
+  // checksums can cause an ACCESS_VIOLATION (0xC0000005) during initdb's
+  // post-bootstrap phase on certain Windows configurations.
+  //
+  // Strategy:
+  //  • If pgdata ALREADY EXISTS the cluster was already initialised with
+  //    this binary on this machine — upgrading now would create a version
+  //    mismatch.  We leave it alone and let it start normally (it worked
+  //    here at least once).
+  //  • If pgdata does NOT exist (first run / failed previous init) AND the
+  //    installed version is unstable, we silently upgrade to the stable @16
+  //    line using the bundled npm, clear the require-cache, and continue.
+  //    This avoids the crash without requiring any user action.
+  const pgVersionFile = path.join(PG_DATA_DIR, 'PG_VERSION');
+  const pgAlreadyInit = fs.existsSync(pgVersionFile);
+
+  // ── Auto-downgrade PostgreSQL 18 to PostgreSQL 16 ────────────────────────
+  // NOTE: every release of the embedded-postgres npm package is labelled
+  // "beta" (e.g. 16.13.0-beta.17, 18.3.0-beta.17) — that is simply the
+  // package author's naming convention and does NOT indicate instability of
+  // the underlying PostgreSQL binaries.
+  //
+  // The actual problem is that PostgreSQL 18 enables data-page checksums by
+  // DEFAULT for the first time.  The checksum computation during initdb's
+  // post-bootstrap phase crashes with ACCESS_VIOLATION (0xC0000005) on
+  // certain Windows hardware/security configurations.  PostgreSQL 16 has
+  // checksums DISABLED by default, so its initdb post-bootstrap phase does
+  // not trigger the crash.
+  //
+  // We therefore downgrade automatically from any 18.x package to PG16 when
+  // the data directory has not yet been initialised (safe to do so).
+  // If pgdata already exists the cluster was already initialised with PG18 on
+  // this machine — it worked here, so we leave it alone.
+  const EP_STABLE_VERSION = '16.13.0-beta.17'; // latest PG16 release of the package
+
+  if (!pgAlreadyInit) {
+    try {
+      const epPkgPath = path.join(API_DIR, 'node_modules', 'embedded-postgres', 'package.json');
+      const epPkg    = JSON.parse(fs.readFileSync(epPkgPath, 'utf-8'));
+      const epVersion = epPkg.version || '';
+      // Detect PG18 by the leading "18." in the version string
+      if (epVersion.startsWith('18.')) {
+        console.log(
+          `[WinZapp] PostgreSQL 18 detectado (embedded-postgres@${epVersion}).` +
+          ` Fazendo downgrade para PostgreSQL 16 (${EP_STABLE_VERSION}) para evitar` +
+          ' falha de inicialização (checksums habilitados por padrão no PG18)...'
+        );
+        // The bundled npm sits one level above api/ in node/node_modules/npm
+        const npmCli = path.join(API_DIR, '..', 'node', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+        if (fs.existsSync(npmCli)) {
+          try {
+            execFileSync(
+              process.execPath,
+              [npmCli, 'install', `embedded-postgres@${EP_STABLE_VERSION}`,
+               '--save', '--no-audit', '--no-fund'],
+              { cwd: API_DIR, env: process.env, stdio: 'pipe' }
+            );
+            console.log(`[WinZapp] Downgrade para embedded-postgres@${EP_STABLE_VERSION} concluído.`);
+            // Clear require-cache so the fresh PG16 package is loaded below
+            Object.keys(require.cache).forEach(key => {
+              if (key.includes('embedded-postgres') || key.includes('@embedded-postgres')) {
+                delete require.cache[key];
+              }
+            });
+          } catch (downgradeErr) {
+            console.error(
+              '[WinZapp] Falha no downgrade automático:',
+              downgradeErr.message,
+              '— prosseguindo com a versão atual (pode ocorrer instabilidade).'
+            );
+          }
+        } else {
+          console.warn('[WinZapp] npm não localizado — downgrade automático não disponível.');
+        }
+      }
+    } catch (_) {
+      // Cannot read version — proceed normally.
     }
-  } catch (_versionCheckErr) {
-    // If we can't read the version, proceed normally — don't block startup.
   }
 
   let EmbeddedPostgres;
@@ -99,12 +158,6 @@ async function main() {
     initdbFlags: ['--encoding=UTF8', '--locale=C'],
   });
 
-  // pg.initialise() runs initdb, which fails if pgdata already exists.
-  // We detect an existing cluster by the presence of the PG_VERSION marker
-  // file that initdb always creates, and skip initialisation in that case.
-  const pgVersionFile = path.join(PG_DATA_DIR, 'PG_VERSION');
-  const pgAlreadyInit = fs.existsSync(pgVersionFile);
-
   if (!pgAlreadyInit) {
     // Retry initdb up to 2 times with a short delay between attempts.
     // A transient file-lock by antivirus (scanning newly-extracted binaries)
@@ -119,9 +172,18 @@ async function main() {
         break;  // success
       } catch (err) {
         lastInitErr = err;
+        const isAccessViolation = err.message.includes('0xC0000005');
         console.error(
           `[WinZapp] Tentativa ${attempt}/${MAX_INIT_ATTEMPTS} de inicialização do PostgreSQL falhou: ${err.message}`
         );
+        if (isAccessViolation) {
+          console.error(
+            '[WinZapp] ACCESS_VIOLATION (0xC0000005) detectada — possíveis causas:\n' +
+            '  1. Antivírus bloqueando o binário recém-extraído (tente adicionar exceção para a pasta WinZapp).\n' +
+            '  2. Política de segurança do Windows (Exploit Guard) interferindo com o processo filho.\n' +
+            '  3. Binário PostgreSQL incompatível com esta configuração de hardware/OS.'
+          );
+        }
         if (attempt < MAX_INIT_ATTEMPTS) {
           // initdb removes pgdata on failure — wait before retrying so that
           // any AV scan of the freshly-extracted binaries has time to finish.

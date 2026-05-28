@@ -351,15 +351,18 @@ class ApiSetupDialog(wx.Dialog):
                 return
 
             # ── Step 4: npm install embedded-postgres --save ──────────────
-            # Pin to the PostgreSQL 16 major version line (latest 16.x.x).
-            # PG16 is the current LTS release with stable, battle-tested Windows
-            # binaries. PG18 beta (the npm @latest at time of writing) enables
-            # data page checksums by default; its checksum code crashes with
-            # ACCESS_VIOLATION (0xC0000005) during initdb post-bootstrap on
-            # certain Windows configurations.
+            # Pin to the latest PostgreSQL 16 package.
+            # All embedded-postgres releases are labelled "beta" by the package
+            # author — that is simply their versioning convention, not an
+            # instability indicator.  The real issue is that PostgreSQL 18
+            # (npm @latest) enables data-page checksums by default for the
+            # first time; its initdb crashes with ACCESS_VIOLATION (0xC0000005)
+            # on certain Windows hardware during post-bootstrap initialization.
+            # PostgreSQL 16 has checksums DISABLED by default and its Windows
+            # binaries are production-hardened.
             self._set_status("Adicionando embedded-postgres...")
             ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "install", "embedded-postgres@16",
+                [node_exe, npm_cli, "install", "embedded-postgres@16.13.0-beta.17",
                  "--save", "--no-audit", "--no-fund"],
                 cwd=api_dir,
                 env=npm_env,
