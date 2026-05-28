@@ -351,5 +351,6 @@
     "ui_focus_label": "When opening a conversation, focus:",
     "ui_focus_message_field": "Message field (default)",
     "ui_focus_unread_or_last": "Unread message indicator or last message",
-    "invalid_messages_page_size": "The messages per page value must be a positive integer."
+    "invalid_messages_page_size": "The messages per page value must be a positive integer.",
+    "forward_search_label": "&Search"
 }

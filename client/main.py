@@ -14,7 +14,7 @@ from accessible_output2 import outputs
 from core.sound_system import SoundSystem, Sound
 from core.i18n import I18n
 from core.websocket_client import WebSocketClient
-from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number, check_internet_connection
+from core.utils import encrypt, decrypt, encrypt_json, decrypt_json, generate_and_save_key, retrieve_key, format_number
 from app_paths import resource_path, data_path
 from core.message_queue import MessageQueue, PendingMessage
 import wx
@@ -99,8 +99,7 @@ class MainWindow(wx.Frame):
         if not self.background_mode:
             self._check_first_run()
 
-        #Check Internet Connection
-        self.offline_mode = not check_internet_connection()
+        self.offline_mode = False
 
         #Play startup sound (skipped in background mode)
         if not self.background_mode:
@@ -123,15 +122,11 @@ class MainWindow(wx.Frame):
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
-        #Connect WebSocket if not Offline
-        if not self.offline_mode:
-            self.connect_websocket()
+        self.connect_websocket()
         self.init_UI()
 
 
     def init_UI(self):
-        if self.offline_mode:
-            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('offline_mode')}")
         self.SetMinSize((400, 300))
         self.main_panel = wx.Panel(self)
 
@@ -346,17 +341,18 @@ class MainWindow(wx.Frame):
     def restore_window(self):
         """Bring the WinZapp window to the foreground.
 
-        Always calls Show() unconditionally so that wx's internal visibility
-        state is re-synced with Win32 in cases where another process showed the
-        window directly via the Win32 API (bypassing wx's state tracking).
+        Uses Win32 ShowWindow + SetForegroundWindow directly to avoid wx
+        state-drift: _on_close hides the window via SW_HIDE which bypasses
+        wx's internal visibility tracking, so wx-level Show()/Raise() calls
+        may silently no-op. SW_RESTORE also handles any minimized state.
         Also refreshes the chat list in case sync updates happened while the
         window was hidden.
         """
-        self.Show()
-        if self.IsIconized():
-            self.Restore()
-        self.Raise()
-        self.SetFocus()
+        import ctypes
+        hwnd = self.GetHandle()
+        SW_RESTORE = 9
+        ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
         if hasattr(self, "conversations_panel"):
             self.add_chats_to_ui()
 
@@ -867,14 +863,6 @@ class MainWindow(wx.Frame):
         self.conversations_panel.Show()
         self.content_panel.Layout()
         self.conversations_panel.conversations_list.SetFocus()
-        if (self.conversations_panel.conversations_list.GetFocusedItem() != -1
-                and self.conversations_panel.conversations_list.GetItemCount() > 0):
-            self.output(
-                self.conversations_panel.conversations_list.GetItemText(
-                    self.conversations_panel.conversations_list.GetFocusedItem()
-                ),
-                interrupt=True,
-            )
 
     def on_alt_4(self, event):
         self.conversations_panel.Hide()
@@ -1068,6 +1056,22 @@ class MainWindow(wx.Frame):
                 self.error_sound.play()
             wx.MessageBox(f"{msg}\n{format_exc()}", title, wx.OK | wx.ICON_ERROR)
             sys.exit()
+        self._migrate_settings()
+
+    def _migrate_settings(self):
+        """Migrate settings from old section names to current ones."""
+        changed = False
+        # audio_default_speed: general → audio_playback
+        if "audio_default_speed" in self.settings.get("general", {}):
+            speed = self.settings["general"].pop("audio_default_speed")
+            self.settings.setdefault("audio_playback", {})["audio_default_speed"] = speed
+            changed = True
+        # ui → user_interface
+        if "ui" in self.settings and "user_interface" not in self.settings:
+            self.settings["user_interface"] = self.settings.pop("ui")
+            changed = True
+        if changed:
+            self.save_settings()
 
     def save_settings(self):
         try:
@@ -1101,17 +1105,27 @@ class MainWindow(wx.Frame):
         self.message_sent_sound             = Sound(self.sound_system, "message_sent.ogg")
 
     def retrieve_token(self):
-        try:
-            with open(data_path("token.tk"), "r") as token_file:
-                self.token = token_file.read().strip()
-        except Exception as e:
+        token = self.settings.get("privateinfo", {}).get("WA_token", "").strip()
+        if not token:
+            # Migration: read from legacy token.tk if WA_token not yet present
+            try:
+                with open(data_path("token.tk"), "r") as f:
+                    token = f.read().strip()
+                if token:
+                    if "privateinfo" not in self.settings:
+                        self.settings["privateinfo"] = {}
+                    self.settings["privateinfo"]["WA_token"] = token
+                    self.save_settings()
+            except Exception:
+                pass
+        if not token:
             if self.background_mode:
-                # No token means WhatsApp has never been paired — nothing to do
-                # in background mode; exit silently so Windows doesn't retry.
+                # No token means WhatsApp has never been paired — exit silently.
                 sys.exit(0)
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('token_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
             sys.exit()
+        self.token = token
 
     def prepare_sync(self):
         os.makedirs(data_path(), exist_ok=True)
@@ -1123,20 +1137,13 @@ class MainWindow(wx.Frame):
         self.chats = self.get_chats()
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
-        if not self.offline_mode:
-            if not self.background_mode:
-                self.connected_sound.play()
-            if self.settings.get("status", {}).get("messages_set_completed"):
-                self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-                self.sync_thread.start()
-            else:
-                self.wait_messages_set()
+        if not self.background_mode:
+            self.connected_sound.play()
+        if self.settings.get("status", {}).get("messages_set_completed"):
+            self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
+            self.sync_thread.start()
         else:
-            if not self.background_mode:
-                self.offline_mode_sound.play()
-                self.output(self.i18n.t("offline_mode_enabled"))
-        self.monitor_thread = threading.Thread(target=self.monitor_internet_connection, daemon=True)
-        self.monitor_thread.start()
+            self.wait_messages_set()
 
     def start_sync(self):
         self.chats = self.get_remote_chats(self.chats)
@@ -2282,36 +2289,6 @@ class MainWindow(wx.Frame):
                 arch_displayed_names.append(name)
             panel.chats_list = arch_displayed_chats
             panel.chat_names = arch_displayed_names
-
-    def monitor_internet_connection(self):
-        while True:
-            is_connected = check_internet_connection()
-            if is_connected and self.offline_mode:
-                #Went online
-                self.offline_mode = False
-                wx.CallAfter(self.on_connection_restored)
-            elif not is_connected and not self.offline_mode:
-                #Went offline
-                self.offline_mode = True
-                wx.CallAfter(self.on_connection_lost)
-            threading.Event().wait(5)  # Check every 5 seconds
-
-    def on_connection_restored(self):
-        self.output(self.i18n.t("connection_restored"), interrupt=True)
-        self.SetTitle(f"{self.i18n.t('app_name')}")
-        self.connected_sound.play()
-        # Immediately retry any messages that accumulated while offline.
-        if hasattr(self, "message_queue"):
-            self.message_queue.flush()
-        self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
-        self.sync_thread.start()
-        self.connect_websocket()
-
-    def on_connection_lost(self):
-        self.output(self.i18n.t("connection_lost"), interrupt=True)
-        self.offline_mode_sound.play()
-        self.output(self.i18n.t("offline_mode_enabled"))
-        self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('offline_mode')}")
 
     def generate_secret_key(self):
         key_file = data_path("secret.key")

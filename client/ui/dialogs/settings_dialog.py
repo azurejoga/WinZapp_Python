@@ -187,10 +187,10 @@ class SettingsDialog(wx.Dialog):
         updates = self.main_window.settings.get("general", {}).get("updates_enabled", True)
         self._updates_check.SetValue(updates)
 
-        page_size = self.main_window.settings.get("ui", {}).get("messages_page_size", 50)
+        page_size = self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         self._messages_page_size_field.SetValue(str(page_size))
 
-        focus_on_open = self.main_window.settings.get("ui", {}).get("focus_on_open", "message_field")
+        focus_on_open = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
         if focus_on_open == "unread_or_last":
             self._focus_unread_or_last_rb.SetValue(True)
         else:
@@ -198,7 +198,7 @@ class SettingsDialog(wx.Dialog):
 
         self._port_field.SetValue(str(self.main_window.evolution_port))
 
-        saved_speed = self.main_window.settings.get("general", {}).get("audio_default_speed", 1.0)
+        saved_speed = self.main_window.settings.get("audio_playback", {}).get("audio_default_speed", 1.0)
         try:
             speed_idx = self._AUDIO_SPEED_STEPS.index(float(saved_speed))
         except (ValueError, TypeError):
@@ -250,14 +250,14 @@ class SettingsDialog(wx.Dialog):
 
         # UI: messages page size
         page_size = int(self._messages_page_size_field.GetValue().strip())
-        self.main_window.settings.setdefault("ui", {})["messages_page_size"] = page_size
+        self.main_window.settings.setdefault("user_interface", {})["messages_page_size"] = page_size
 
         # UI: focus on open
         focus_on_open = (
             "unread_or_last" if self._focus_unread_or_last_rb.GetValue()
             else "message_field"
         )
-        self.main_window.settings.setdefault("ui", {})["focus_on_open"] = focus_on_open
+        self.main_window.settings.setdefault("user_interface", {})["focus_on_open"] = focus_on_open
 
         # Port
         port = int(self._port_field.GetValue().strip())
@@ -312,7 +312,7 @@ class SettingsDialog(wx.Dialog):
         speed_sel = self._audio_speed_combo.GetSelection()
         if speed_sel != wx.NOT_FOUND:
             new_speed = self._AUDIO_SPEED_STEPS[speed_sel]
-            self.main_window.settings.setdefault("general", {})["audio_default_speed"] = new_speed
+            self.main_window.settings.setdefault("audio_playback", {})["audio_default_speed"] = new_speed
             # Sync live playback panel so the button label and next playback use the new speed
             cp = getattr(self.main_window, "conversations_panel", None)
             if cp is not None:

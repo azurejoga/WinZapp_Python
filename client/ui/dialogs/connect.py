@@ -241,12 +241,11 @@ class Connect:
     # ── Connection status ──────────────────────────────────────────────────
 
     def check_connection_status(self):
-        #Check if token file exists and WA_token is available in settings
-        token_path = data_path("token.tk")
         private_info = self.main_window.settings.get("privateinfo", {})
-        if os.path.exists(token_path) and private_info.get("WA_token"):
+        if private_info.get("WA_token", "").strip():
             return True
-        return False
+        # Legacy fallback: accept token.tk so migrate path in retrieve_token() runs
+        return os.path.exists(data_path("token.tk"))
 
     # ── Connection dialog ──────────────────────────────────────────────────
 

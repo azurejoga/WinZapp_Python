@@ -88,12 +88,17 @@ class ModuleInstallDialog(wx.Dialog):
         node_exe = resource_path("node", "node.exe")
         npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
         api_dir  = resource_path("api")
+        # Prepend bundled node/ to PATH so npm's internal sub-processes use
+        # the portable node.exe rather than whatever is on the system PATH.
+        node_dir = resource_path("node")
+        npm_env  = {**os.environ, "PATH": node_dir + os.pathsep + os.environ.get("PATH", "")}
 
         try:
             # ── Step 1: npm install ──────────────────────────────────────
             self._proc = subprocess.Popen(
                 [node_exe, npm_cli, "install", "--no-audit", "--no-fund"],
                 cwd=api_dir,
+                env=npm_env,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
@@ -119,14 +124,14 @@ class ModuleInstallDialog(wx.Dialog):
                 pass
 
             if has_db_generate:
-                env = {**os.environ, "DATABASE_PROVIDER": "postgresql"}
+                db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
                 self._proc = subprocess.Popen(
                     [node_exe, npm_cli, "run", "db:generate"],
                     cwd=api_dir,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
-                    env=env,
+                    env=db_env,
                 )
                 _, stderr_bytes = self._proc.communicate()
                 rc = self._proc.returncode

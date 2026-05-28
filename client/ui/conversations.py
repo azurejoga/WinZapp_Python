@@ -59,7 +59,7 @@ class ConversationsPanel(wx.Panel):
         self._audio_speed_steps = [1.0, 1.5, 2.0]
         self._audio_tempo_map = {1.0: 0, 1.5: 50, 2.0: 100}
         # Restore the last-used speed from settings (persists across conversations/sessions)
-        _saved_speed = self.main_window.settings.get("general", {}).get("audio_default_speed", 1.0)
+        _saved_speed = self.main_window.settings.get("audio_playback", {}).get("audio_default_speed", 1.0)
         try:
             self._audio_speed_index = self._audio_speed_steps.index(float(_saved_speed))
         except (ValueError, TypeError):
@@ -94,6 +94,10 @@ class ConversationsPanel(wx.Panel):
         # ── Unread separator ────────────────────────────────────────────────
         # Index in _sorted_messages of the unread-separator sentinel, or -1
         self._unread_sep_idx: int = -1
+        # Unread count captured before mark-as-read thread starts (avoids race)
+        self._pending_open_unread: int = 0
+        # True while the separator was placed from the initial open (not from a live message)
+        self._sep_from_open: bool = False
 
         # ── Reaction tracking ───────────────────────────────────────────────
         # Maps original_msg_id → {emoji: count}
@@ -538,6 +542,7 @@ class ConversationsPanel(wx.Panel):
         self._hide_all_media_controls()
         self._hide_attachment_panel()
         self._unread_sep_idx = -1  # reset separator for new conversation
+        self._sep_from_open = False
         self._quoted_message = None
         self._reaction_map   = {}
         # Reset search state
@@ -573,6 +578,8 @@ class ConversationsPanel(wx.Panel):
         self.conversation_panel.Show()
         self.Layout()
         self.preselect_messages()
+        # Snapshot before the background thread zeros unreadCount on the same dict
+        self._pending_open_unread = int(conversation.get("unreadCount") or 0)
         threading.Thread(
             target=self.main_window.mark_conversation_as_read,
             args=(jid,),
@@ -589,7 +596,7 @@ class ConversationsPanel(wx.Panel):
         self.populate_messages()
 
         # Set focus based on user preference
-        focus_setting = self.main_window.settings.get("ui", {}).get("focus_on_open", "message_field")
+        focus_setting = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
         if focus_setting == "unread_or_last":
             if self._unread_sep_idx < 0:
                 # No unread separator — focus on last message
@@ -1582,7 +1589,7 @@ class ConversationsPanel(wx.Panel):
         self._is_loading_more = True
         try:
             limit = int(
-                self.main_window.settings.get("ui", {}).get("messages_page_size", 50)
+                self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
             )
             new_start = max(0, self._messages_offset - limit)
             new_msgs  = self._all_sorted_messages[new_start:self._messages_offset]
@@ -2098,7 +2105,7 @@ class ConversationsPanel(wx.Panel):
             except Exception:
                 pass
         # Persist the new speed so it applies to all future playbacks/conversations
-        self.main_window.settings.setdefault("general", {})["audio_default_speed"] = speed
+        self.main_window.settings.setdefault("audio_playback", {})["audio_default_speed"] = speed
         self.main_window.save_settings()
 
     def on_audio_slider(self, event):
@@ -2826,9 +2833,13 @@ class ConversationsPanel(wx.Panel):
         p     = wx.Panel(dlg)
         vsz   = wx.BoxSizer(wx.VERTICAL)
 
+        vsz.Add(
+            wx.StaticText(p, label=i18n.t("forward_search_label")),
+            0, wx.LEFT | wx.TOP | wx.RIGHT, 6,
+        )
         search_field = wx.TextCtrl(p, style=wx.TE_PROCESS_ENTER)
         search_field.SetHint(i18n.t("search_conversations"))
-        vsz.Add(search_field, 0, wx.EXPAND | wx.ALL, 6)
+        vsz.Add(search_field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
         lst = wx.ListBox(p, choices=all_names, style=wx.LB_SINGLE)
         vsz.Add(lst, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
@@ -3728,14 +3739,27 @@ class ConversationsPanel(wx.Panel):
 
         # Manage unread separator
         if self._unread_sep_idx == -1:
-            # First new message in this session — insert separator before it
+            # No separator yet — insert one before this new message
             sep_pos = len(self._sorted_messages)
             sep = {"_type": "unread_separator", "count": 1}
             self._sorted_messages.insert(sep_pos, sep)
             self.messages_list.InsertItem(sep_pos, self._render_separator(1))
             self._unread_sep_idx = sep_pos
+            self._sep_from_open = False
+        elif self._sep_from_open:
+            # Separator was placed when the conversation was opened (old unread messages).
+            # Move it to just before this new message and reset the count to 1.
+            old_idx = self._unread_sep_idx
+            self._sorted_messages.pop(old_idx)
+            self.messages_list.DeleteItem(old_idx)
+            sep_pos = len(self._sorted_messages)
+            sep = {"_type": "unread_separator", "count": 1}
+            self._sorted_messages.insert(sep_pos, sep)
+            self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+            self._unread_sep_idx = sep_pos
+            self._sep_from_open = False
         else:
-            # Separator already present — increment its count
+            # Separator was placed by a previous live message — increment its count
             sep = self._sorted_messages[self._unread_sep_idx]
             sep["count"] = sep.get("count", 0) + 1
             self.messages_list.SetItemText(
@@ -3806,18 +3830,21 @@ class ConversationsPanel(wx.Panel):
             m for m in messages_sorted if m.get("messageType", "") != "reactionMessage"
         ]
 
-        # Insert unread separator before the first unread message
-        unread_count = int((self.conversation or {}).get("unreadCount") or 0)
+        # Insert unread separator before the first unread message.
+        # Use the snapshot taken before mark_conversation_as_read() zeros the dict.
+        unread_count = self._pending_open_unread
+        self._pending_open_unread = 0
         if unread_count > 0 and len(displayable) >= unread_count:
             sep_pos = len(displayable) - unread_count
             sep = {"_type": "unread_separator", "count": unread_count}
             displayable = displayable[:sep_pos] + [sep] + displayable[sep_pos:]
             self._unread_sep_idx = sep_pos
+            self._sep_from_open = True
 
         # ── Pagination: show only last N messages ────────────────────────────
         self._all_sorted_messages = displayable
         limit = int(
-            self.main_window.settings.get("ui", {}).get("messages_page_size", 50)
+            self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         )
         if len(displayable) > limit:
             self._messages_offset = len(displayable) - limit

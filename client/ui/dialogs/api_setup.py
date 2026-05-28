@@ -295,6 +295,11 @@ class ApiSetupDialog(wx.Dialog):
         node_exe = resource_path("node", "node.exe")
         npm_cli  = resource_path("node", "node_modules", "npm", "bin", "npm-cli.js")
         api_dir  = resource_path("api")
+        # Prepend the bundled node/ dir to PATH so that npm's internal
+        # sub-processes (lifecycle scripts, node-gyp, etc.) use the portable
+        # node.exe instead of whatever is (or isn't) on the system PATH.
+        node_dir = resource_path("node")
+        npm_env  = {**os.environ, "PATH": node_dir + os.pathsep + os.environ.get("PATH", "")}
         # forced_tag (from update flow) takes precedence over the .env value
         tag      = self._forced_tag if self._forced_tag is not None else self._read_env_value("EVOLUTION_TAG_VERSION")
 
@@ -351,6 +356,7 @@ class ApiSetupDialog(wx.Dialog):
                 [node_exe, npm_cli, "install", "embedded-postgres",
                  "--save", "--no-audit", "--no-fund"],
                 cwd=api_dir,
+                env=npm_env,
             )
             if not ok:
                 if not self._cancelled:
@@ -366,6 +372,7 @@ class ApiSetupDialog(wx.Dialog):
             ok, err = self._run_subprocess(
                 [node_exe, npm_cli, "install", "--no-audit", "--no-fund"],
                 cwd=api_dir,
+                env=npm_env,
             )
             if not ok:
                 if not self._cancelled:
@@ -388,19 +395,16 @@ class ApiSetupDialog(wx.Dialog):
 
             if has_db_generate:
                 self._set_status("Gerando cliente Prisma (db:generate)...")
-                env = {**os.environ, "DATABASE_PROVIDER": "postgresql"}
+                db_env = {**npm_env, "DATABASE_PROVIDER": "postgresql"}
                 ok, err = self._run_subprocess(
                     [node_exe, npm_cli, "run", "db:generate"],
                     cwd=api_dir,
-                    env=env,
+                    env=db_env,
                 )
                 if not ok and not self._cancelled:
                     wx.CallAfter(self._finish_error,
                                  f"Falha em npm run db:generate:\n\n{err}")
                     return
-
-            if self._cancelled:
-                return
 
             if self._cancelled:
                 return
@@ -413,6 +417,7 @@ class ApiSetupDialog(wx.Dialog):
             ok, err = self._run_subprocess(
                 [node_exe, npm_cli, "run", "build"],
                 cwd=api_dir,
+                env=npm_env,
             )
             if not ok:
                 if not self._cancelled:

@@ -355,8 +355,15 @@ class StatusPanel(wx.Panel):
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            # Legacy path: dict with 'statuses' or 'records' wrapper key
-            items = data.get("statuses", data.get("records", []))
+            # Try common wrapper keys used by different Evolution API versions
+            items = (
+                data.get("statuses")
+                or data.get("records")
+                or data.get("messages")
+                or data.get("statusMessages")
+                or data.get("data")
+                or []
+            )
         else:
             return my_statuses, contacts
 

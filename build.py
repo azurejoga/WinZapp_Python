@@ -199,8 +199,11 @@ def nuitka_compile():
         "--windows-console-mode=disable",
         "--output-dir=" + BUILD_DIR,
         "--output-filename=WinZapp",
-        # Extract to a persistent cache location (faster re-launches)
-        "--onefile-tempdir-spec={CACHE_DIR}/WinZapp",
+        # Extract to a persistent cache that does NOT collide with the
+        # default installer path (%LOCALAPPDATA%\WinZapp).  Nuitka maps
+        # {CACHE_DIR} to %LOCALAPPDATA% on Windows, so appending _runtime
+        # keeps the two directories distinct.
+        "--onefile-tempdir-spec={CACHE_DIR}/WinZapp_runtime",
         # Packages to include inside the exe
         "--include-package=sound_lib",
         "--include-package=accessible_output2",

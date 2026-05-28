@@ -18,5 +18,12 @@
     },
     "status": {
         "messages_set_completed": false
+    },
+    "user_interface": {
+        "messages_page_size": 200,
+        "focus_on_open": "message_field"
+    },
+    "audio_playback": {
+        "audio_default_speed": 1.0
     }
 }

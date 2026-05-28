@@ -3,7 +3,7 @@ WinZapp System Tray Icon
 ------------------------
 Manages the notification-area icon that persists while WinZapp is running,
 including the animated tooltip with unread-message counts and the
-right-click context menu (Open / Offline mode toggle / Exit).
+right-click context menu (Open / Exit).
 """
 
 import os
@@ -12,9 +12,8 @@ import wx.adv
 from core.i18n import I18n
 from app_paths import resource_path
 
-_ID_OPEN    = wx.NewIdRef(count=1)
-_ID_OFFLINE = wx.NewIdRef(count=1)
-_ID_EXIT    = wx.NewIdRef(count=1)
+_ID_OPEN = wx.NewIdRef(count=1)
+_ID_EXIT = wx.NewIdRef(count=1)
 
 
 class TrayIcon(wx.adv.TaskBarIcon):
@@ -29,9 +28,8 @@ class TrayIcon(wx.adv.TaskBarIcon):
         self._icon = self._load_icon()
 
         self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self._on_activate)
-        self.Bind(wx.EVT_MENU, self._on_open,           id=_ID_OPEN)
-        self.Bind(wx.EVT_MENU, self._on_offline_toggle, id=_ID_OFFLINE)
-        self.Bind(wx.EVT_MENU, self._on_exit,           id=_ID_EXIT)
+        self.Bind(wx.EVT_MENU, self._on_open, id=_ID_OPEN)
+        self.Bind(wx.EVT_MENU, self._on_exit, id=_ID_EXIT)
 
         self.update_tooltip()
 
@@ -152,8 +150,6 @@ class TrayIcon(wx.adv.TaskBarIcon):
         i18n = self.i18n
         menu = wx.Menu()
         menu.Append(_ID_OPEN, i18n.t("tray_open"))
-        offline_item = menu.AppendCheckItem(_ID_OFFLINE, i18n.t("tray_offline_mode"))
-        offline_item.Check(self.main_window.offline_mode)
         menu.AppendSeparator()
         menu.Append(_ID_EXIT, i18n.t("tray_exit"))
         return menu
@@ -166,13 +162,6 @@ class TrayIcon(wx.adv.TaskBarIcon):
 
     def _on_open(self, event):
         wx.CallAfter(self.main_window.restore_window)
-
-    def _on_offline_toggle(self, event):
-        mw = self.main_window
-        if mw.offline_mode:
-            wx.CallAfter(mw.on_connection_restored)
-        else:
-            wx.CallAfter(mw.on_connection_lost)
 
     def _on_exit(self, event):
         wx.CallAfter(self.main_window.real_exit)

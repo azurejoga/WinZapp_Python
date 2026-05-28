@@ -351,5 +351,6 @@
     "ui_focus_label": "Al abrir una conversación, enfocar:",
     "ui_focus_message_field": "Campo de mensaje (predeterminado)",
     "ui_focus_unread_or_last": "Indicador de mensajes no leídos o último mensaje",
-    "invalid_messages_page_size": "El número de mensajes por página debe ser un entero positivo."
+    "invalid_messages_page_size": "El número de mensajes por página debe ser un entero positivo.",
+    "forward_search_label": "&Buscar"
 }

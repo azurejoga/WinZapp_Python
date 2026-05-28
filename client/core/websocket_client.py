@@ -1,12 +1,7 @@
-import os
-import sys
 import threading
 import socketio
 import wx
-import json
 from core.i18n import I18n
-from app_paths import data_path
-from traceback import format_exc
 
 class WebSocketClient:
     def __init__(self, main_window, connect, instance_name):
@@ -28,6 +23,7 @@ class WebSocketClient:
         self.sio.on("qrcode.updated", self.on_qrcode_update, namespace=f"/{self.instance_name}")
         self.sio.on("messages.set", self.on_messages_set, namespace=f"/{self.instance_name}")
         self.sio.on("messages.upsert", self.on_messages_upsert, namespace=f"/{self.instance_name}")
+        self.sio.on("contacts.update", self.on_contacts_update, namespace=f"/{self.instance_name}")
 
     def on_connect(self):
         print("WebSocket connected.")
@@ -48,14 +44,6 @@ class WebSocketClient:
             wx.MessageBox(self.i18n.t("instance_state_changed"), self.i18n.t("error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR, parent_dialog)
 
     def on_pairing_complete(self):
-        #Saves the new user token in the data  directory
-        try:
-            self.save_token(self.instance_name)
-        except Exception as e:
-            self.main_window.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('token_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.main_window.app_name), wx.OK | wx.ICON_ERROR)
-            sys.exit()
-
         # Destroy dialogs on the main thread to avoid wx thread-safety issues.
         # Guards against the case where the app is already paired (no dialogs open).
         def _close_dialogs():
@@ -71,10 +59,6 @@ class WebSocketClient:
                     pass
 
         wx.CallAfter(_close_dialogs)
-
-    def save_token(self, token):
-        with open(data_path("token.tk"), "w") as token_file:
-            token_file.write(token)
 
 
     def on_qrcode_update(self, info):
@@ -147,3 +131,41 @@ class WebSocketClient:
 
         except Exception as e:
             print(f"[WebSocketClient] on_messages_upsert error: {e}")
+
+    def on_contacts_update(self, info):
+        """
+        Handle contacts.update for real-time 1:1 message notifications.
+
+        In Evolution API, when a direct-message arrives the contact record is
+        updated (unread count, lastMessage) and contacts.update fires.  Group
+        messages continue to arrive via messages.upsert.
+
+        Payload expected:
+          {"data": [{"id": "<jid>", ..., "lastMessage": {...}}]}
+
+        on_new_message performs duplicate-ID detection, so even if
+        messages.upsert also fires for the same message it will be silently
+        skipped the second time.
+        """
+        try:
+            data = info.get("data", [])
+            if not isinstance(data, list):
+                return
+            for contact in data:
+                if not isinstance(contact, dict):
+                    continue
+                jid = contact.get("id", "") or contact.get("remoteJid", "")
+                # Group chats are handled by messages.upsert
+                if not jid or jid.endswith("@g.us") or jid.endswith("@broadcast"):
+                    continue
+                last_msg = contact.get("lastMessage") or contact.get("msgs")
+                if isinstance(last_msg, list):
+                    last_msg = last_msg[-1] if last_msg else None
+                if not last_msg or not isinstance(last_msg, dict):
+                    continue
+                key = last_msg.get("key", {})
+                if key.get("fromMe", False):
+                    continue
+                wx.CallAfter(self.main_window.on_new_message, last_msg)
+        except Exception as e:
+            print(f"[WebSocketClient] on_contacts_update error: {e}")
