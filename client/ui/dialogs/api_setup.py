@@ -351,9 +351,15 @@ class ApiSetupDialog(wx.Dialog):
                 return
 
             # ── Step 4: npm install embedded-postgres --save ──────────────
+            # Pin to the PostgreSQL 16 major version line (latest 16.x.x).
+            # PG16 is the current LTS release with stable, battle-tested Windows
+            # binaries. PG18 beta (the npm @latest at time of writing) enables
+            # data page checksums by default; its checksum code crashes with
+            # ACCESS_VIOLATION (0xC0000005) during initdb post-bootstrap on
+            # certain Windows configurations.
             self._set_status("Adicionando embedded-postgres...")
             ok, err = self._run_subprocess(
-                [node_exe, npm_cli, "install", "embedded-postgres",
+                [node_exe, npm_cli, "install", "embedded-postgres@16",
                  "--save", "--no-audit", "--no-fund"],
                 cwd=api_dir,
                 env=npm_env,

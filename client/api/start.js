@@ -46,6 +46,31 @@ process.env.SERVER_TYPE             = 'http';
 
 async function main() {
   // ── 1. Start embedded PostgreSQL ─────────────────────────────────────────
+
+  // ── Version guard ─────────────────────────────────────────────────────────
+  // PostgreSQL 18 beta (embedded-postgres@18.x.x-beta.xx) enables data page
+  // checksums by default for the first time.  Its checksum code crashes with
+  // ACCESS_VIOLATION (0xC0000005) during initdb post-bootstrap initialization
+  // on certain Windows machines.  If a beta version is detected, emit a clear
+  // error and ask the user to reinstall rather than crashing silently.
+  try {
+    const epPkgPath = path.join(API_DIR, 'node_modules', 'embedded-postgres', 'package.json');
+    const epPkg = JSON.parse(fs.readFileSync(epPkgPath, 'utf-8'));
+    const epVersion = epPkg.version || '';
+    if (epVersion.toLowerCase().includes('beta') || epVersion.toLowerCase().includes('alpha') || epVersion.toLowerCase().includes('rc')) {
+      console.error(
+        `[WinZapp] ERRO: versão instável do PostgreSQL detectada (embedded-postgres@${epVersion}).\n` +
+        `Esta versão beta pode causar falhas (ACCESS_VIOLATION 0xC0000005) durante a\n` +
+        `inicialização do banco de dados em algumas máquinas Windows.\n` +
+        `Solução: feche o WinZapp, delete a pasta "api\\node_modules" e execute o WinZapp\n` +
+        `novamente para reinstalar os módulos com a versão estável.`
+      );
+      process.exit(1);
+    }
+  } catch (_versionCheckErr) {
+    // If we can't read the version, proceed normally — don't block startup.
+  }
+
   let EmbeddedPostgres;
   try {
     EmbeddedPostgres = require('embedded-postgres').default;
@@ -65,12 +90,12 @@ async function main() {
     // --encoding=UTF8  : store all data in UTF-8 (avoids error 22P05 on emoji).
     // --locale=C       : use the C/POSIX locale instead of the system locale
     //                    (e.g. Portuguese_Brazil.1252 / CP1252).  This prevents
-    //                    an ACCESS_VIOLATION (0xC0000005) crash that occurs
-    //                    during initdb's "performing post-bootstrap initialization"
-    //                    phase on Windows systems whose libc locale routines
-    //                    are called with a non-UTF-8 code page.  Safe to use
-    //                    because the application database is created explicitly
-    //                    with LC_COLLATE='C' and LC_CTYPE='C' anyway.
+    //                    an ACCESS_VIOLATION (0xC0000005) crash during initdb's
+    //                    "performing post-bootstrap initialization" phase on
+    //                    Windows systems whose libc locale routines are called
+    //                    with a non-UTF-8 code page.  Safe to use because the
+    //                    application database is created explicitly with
+    //                    LC_COLLATE='C' and LC_CTYPE='C' anyway.
     initdbFlags: ['--encoding=UTF8', '--locale=C'],
   });
 
@@ -80,10 +105,38 @@ async function main() {
   const pgVersionFile = path.join(PG_DATA_DIR, 'PG_VERSION');
   const pgAlreadyInit = fs.existsSync(pgVersionFile);
 
-  try {
-    if (!pgAlreadyInit) {
-      await pg.initialise();
+  if (!pgAlreadyInit) {
+    // Retry initdb up to 2 times with a short delay between attempts.
+    // A transient file-lock by antivirus (scanning newly-extracted binaries)
+    // can cause an ACCESS_VIOLATION in the child process; waiting a few
+    // seconds often allows the AV scan to complete before the retry.
+    const MAX_INIT_ATTEMPTS = 2;
+    let lastInitErr = null;
+    for (let attempt = 1; attempt <= MAX_INIT_ATTEMPTS; attempt++) {
+      try {
+        await pg.initialise();
+        lastInitErr = null;
+        break;  // success
+      } catch (err) {
+        lastInitErr = err;
+        console.error(
+          `[WinZapp] Tentativa ${attempt}/${MAX_INIT_ATTEMPTS} de inicialização do PostgreSQL falhou: ${err.message}`
+        );
+        if (attempt < MAX_INIT_ATTEMPTS) {
+          // initdb removes pgdata on failure — wait before retrying so that
+          // any AV scan of the freshly-extracted binaries has time to finish.
+          console.error('[WinZapp] Aguardando 4 segundos antes de tentar novamente...');
+          await new Promise(resolve => setTimeout(resolve, 4000));
+        }
+      }
     }
+    if (lastInitErr) {
+      console.error('[WinZapp] Failed to start embedded PostgreSQL:', lastInitErr.message);
+      process.exit(1);
+    }
+  }
+
+  try {
     await pg.start();
   } catch (err) {
     console.error('[WinZapp] Failed to start embedded PostgreSQL:', err.message);
