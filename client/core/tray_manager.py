@@ -71,10 +71,19 @@ class TrayIcon(wx.adv.TaskBarIcon):
     # ── Tooltip ───────────────────────────────────────────────────────────────
 
     def update_tooltip(self):
-        """Rebuild the tooltip from current unread counts and refresh the icon."""
+        """Rebuild the tooltip from current unread counts and refresh the icon.
+
+        On Windows 11, NVDA accumulates tooltip text from successive SetIcon
+        calls on the same icon slot.  Removing the icon first ensures only the
+        new tooltip text is announced.
+        """
         self.i18n.get_language()
         total, names = self._get_unread_info()
         tooltip = self._build_tooltip(total, names)
+        try:
+            self.RemoveIcon()
+        except Exception:
+            pass
         try:
             self.SetIcon(self._icon, tooltip)
         except Exception:

@@ -70,6 +70,7 @@
     "copy_error_text": "&Copy error text to clipboard",
     "close": "&Close",
     "error_copied": "Error text copied.",
+    "download": "Download",
     "downloading": "downloading...",
     "decimal_separator": ".",
     "audio_progress_label": "Audio progress",

@@ -70,6 +70,7 @@
     "copy_error_text": "&Copiar texto del error al portapapeles",
     "close": "&Cerrar",
     "error_copied": "Texto del error copiado.",
+    "download": "Descargar",
     "downloading": "descargando...",
     "decimal_separator": ",",
     "audio_progress_label": "Progreso del audio",

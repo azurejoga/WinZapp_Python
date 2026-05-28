@@ -327,21 +327,38 @@ class MainWindow(wx.Frame):
         """
         Intercept the window-close button.
         If the tray icon is active, hide the window instead of exiting.
+
+        Uses Win32 ShowWindow(SW_HIDE) directly so that the window is
+        physically hidden even when wx's internal IsShown() state has drifted
+        out of sync (e.g. after another process showed the window via Win32
+        without going through wx's Show() path).
         """
         if self.tray_icon is not None:
-            self.Hide()
+            try:
+                import ctypes
+                ctypes.windll.user32.ShowWindow(self.GetHandle(), 0)  # SW_HIDE = 0
+            except Exception:
+                self.Hide()
             event.Veto()
         else:
             self.real_exit()
 
     def restore_window(self):
-        """Bring the WinZapp window to the foreground."""
-        if not self.IsShown():
-            self.Show()
+        """Bring the WinZapp window to the foreground.
+
+        Always calls Show() unconditionally so that wx's internal visibility
+        state is re-synced with Win32 in cases where another process showed the
+        window directly via the Win32 API (bypassing wx's state tracking).
+        Also refreshes the chat list in case sync updates happened while the
+        window was hidden.
+        """
+        self.Show()
         if self.IsIconized():
             self.Restore()
         self.Raise()
         self.SetFocus()
+        if hasattr(self, "conversations_panel"):
+            self.add_chats_to_ui()
 
     def real_exit(self):
         """Completely close WinZapp, removing the tray icon and stopping all threads."""
@@ -1129,19 +1146,28 @@ class MainWindow(wx.Frame):
             self.synchronizing_sound.play()
             wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
             self.output(self.i18n.t("synchronization_started"), interrupt=True)
-        # Phase 1: sync all messages (no media download)
+
+        # ── Phase 1: sync all messages ────────────────────────────────────
         self.sync_remote_chats()
-        # Phase 2: download media for all chats
-        if not self.background_mode:
-            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
-        self.sync_media_for_all_chats()
+
+        # Conversations are fully sorted as soon as messages are synced.
+        # Sort, display, play sync-complete sound, and announce to the user
+        # NOW — before the slower media-download phase begins.
+        wx.CallAfter(self.set_chats)
+        wx.CallAfter(self.preselect_conversations)
         if not self.background_mode:
             self.sync_complete_sound.play()
             wx.CallAfter(self._set_status, "")
             self.output(self.i18n.t("sync_complete"))
-        # Refresh the conversations list UI after sync (order/names may have changed)
+
+        # ── Phase 2: download media (silent) ──────────────────────────────
+        if not self.background_mode:
+            wx.CallAfter(self._set_status, self.i18n.t("downloading_media"))
+        self.sync_media_for_all_chats()
+        if not self.background_mode:
+            wx.CallAfter(self._set_status, "")
+        # Final refresh so any media-resolved previews appear in the list.
         wx.CallAfter(self.set_chats)
-        wx.CallAfter(self.preselect_conversations)
 
     def wait_messages_set(self):
         if not self.background_mode:
@@ -1308,10 +1334,17 @@ class MainWindow(wx.Frame):
         main_names = [n for _, n in pairs]
 
         self.chat_names = main_names
+        # _all_chats_list / _all_chat_names always hold the full sorted list.
+        # add_chats_to_ui() reads these to apply the search filter, then
+        # writes back to chats_list / chat_names so indices stay consistent.
+        self.conversations_panel._all_chats_list = main_chats
+        self.conversations_panel._all_chat_names = main_names
         self.conversations_panel.chats_list = main_chats
         self.conversations_panel.chat_names = main_names
 
         if hasattr(self, "archived_conversations_panel"):
+            self.archived_conversations_panel._all_chats_list = arch_chats
+            self.archived_conversations_panel._all_chat_names = arch_names
             self.archived_conversations_panel.chats_list = arch_chats
             self.archived_conversations_panel.chat_names = arch_names
 
@@ -1517,16 +1550,38 @@ class MainWindow(wx.Frame):
         with open(media_path, "wb") as f:
             f.write(encrypted)
 
+    @staticmethod
+    def _clean_quoted(quoted: dict) -> dict:
+        """Return a copy of *quoted* with all local-only (``_``-prefixed) keys
+        removed so that the Evolution API does not receive internal state fields
+        such as ``_local_pending`` or ``_local_id``.
+        Only the fields expected by the API (``key``, ``message``, …) are kept.
+        """
+        if not quoted:
+            return quoted
+        return {k: v for k, v in quoted.items() if not k.startswith("_")}
+
     def send_text_message(self, remote_jid, text, quoted=None):
         """Send a plain-text message via the Evolution API."""
         url = f"{self.evolution_server}:{self.evolution_port}/message/sendText/{self.token}"
         payload = {"number": remote_jid, "text": text}
         if quoted:
-            payload["quoted"] = quoted
+            payload["quoted"] = self._clean_quoted(quoted)
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
-            return response.status_code in (200, 201)
+            if response.status_code not in (200, 201):
+                return False
+            # Evolution API may return HTTP 200 with an error body (e.g. when the
+            # quoted field is malformed).  Treat responses without a "key" as failure
+            # so the queue retries.
+            try:
+                body = response.json()
+                if isinstance(body, dict) and "key" not in body:
+                    return False
+            except Exception:
+                pass
+            return True
         except Exception:
             return False
 
@@ -1552,7 +1607,7 @@ class MainWindow(wx.Frame):
             "ptt":      True,
         }
         if quoted:
-            payload["quoted"] = quoted
+            payload["quoted"] = self._clean_quoted(quoted)
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
@@ -1910,7 +1965,7 @@ class MainWindow(wx.Frame):
             "caption":   caption,
         }
         if quoted:
-            payload["quoted"] = quoted
+            payload["quoted"] = self._clean_quoted(quoted)
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -1937,7 +1992,7 @@ class MainWindow(wx.Frame):
             "contact": [{"fullName": name, "wuid": phone_raw, "phoneNumber": phone_fmt}],
         }
         if quoted:
-            payload["quoted"] = quoted
+            payload["quoted"] = self._clean_quoted(quoted)
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -2025,6 +2080,22 @@ class MainWindow(wx.Frame):
                         orig_text = (orig_obj.get("conversation") or "")[:40]
                     elif orig_type == "extendedTextMessage":
                         orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")[:40]
+                    elif orig_type == "audioMessage":
+                        orig_text = i18n.t("message_type_audio")
+                    elif orig_type == "videoMessage":
+                        orig_text = i18n.t("video")
+                    elif orig_type == "imageMessage":
+                        orig_text = i18n.t("photo")
+                    elif orig_type == "documentMessage":
+                        orig_text = i18n.t("document")
+                    elif orig_type == "stickerMessage":
+                        orig_text = i18n.t("sticker")
+                    elif orig_type == "contactMessage":
+                        orig_text = i18n.t("notif_contact")
+                    elif orig_type == "locationMessage":
+                        orig_text = i18n.t("notif_location")
+                    else:
+                        orig_text = i18n.t("notif_unsupported")
                     break
             ts = last.get("messageTimestamp")
             time_str = ""
@@ -2117,17 +2188,50 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
 
-        you_prefix = (i18n.t("conv_preview_you") + " ") if from_me else ""
-        parts = [f"{you_prefix}{content}"]
+        # For group chats add sender name before content (e.g. "João: vídeo 0:30")
+        jid      = chat.get("remoteJid", "")
+        is_group = jid.endswith("@g.us")
+        if from_me:
+            sender_prefix = i18n.t("conv_preview_you") + " "
+        elif is_group:
+            p_key        = last.get("key", {})
+            sender_jid   = p_key.get("participant") or p_key.get("remoteJid", "")
+            sender_name  = (
+                last.get("pushName")
+                or self._resolve_contact_name({"remoteJid": sender_jid})
+                or sender_jid.split("@")[0]
+            )
+            sender_prefix = f"{sender_name}: " if sender_name else ""
+        else:
+            sender_prefix = ""
+        parts = [f"{sender_prefix}{content}"]
         if time_str:
             parts.append(time_str)
         return " ".join(parts)
 
     def add_chats_to_ui(self):
+        """Rebuild the conversations list from the current chats data.
+
+        Applies the active search filter to both the wx.ListCtrl *and* the
+        backing chats_list/chat_names arrays so that list indices are always
+        consistent.  Without this sync the user would open the wrong
+        conversation when a search was active.
+        """
         search = self.conversations_panel.search_field.GetValue().strip().lower()
+
+        # Always start from the full sorted lists saved by set_chats() so
+        # that restoring the window or clearing a search shows all chats.
+        full_chats = list(getattr(self.conversations_panel, '_all_chats_list',
+                                  self.conversations_panel.chats_list))
+        full_names = list(getattr(self.conversations_panel, '_all_chat_names',
+                                  self.conversations_panel.chat_names))
+
+        displayed_chats: list = []
+        displayed_names: list = []
+
         self.conversations_panel.conversations_list.DeleteAllItems()
-        for i, chat in enumerate(self.conversations_panel.chats_list):
-            name = self.conversations_panel.chat_names[i]
+        for i, chat in enumerate(full_chats):
+            name = full_names[i]
             if search and search not in name.lower():
                 continue
             unread = int(chat.get("unreadCount") or 0)
@@ -2143,13 +2247,24 @@ class MainWindow(wx.Frame):
             if preview:
                 item_text += f" {preview}"
             self.conversations_panel.conversations_list.Append((item_text,))
+            displayed_chats.append(chat)
+            displayed_names.append(name)
+
+        # Keep backing lists in sync with exactly what is displayed so that
+        # on_conversation_selected_by_index(idx) always maps correctly.
+        self.conversations_panel.chats_list = displayed_chats
+        self.conversations_panel.chat_names = displayed_names
 
         # Also refresh the archived panel if present
         if hasattr(self, "archived_conversations_panel"):
             panel = self.archived_conversations_panel
+            arch_full_chats = list(getattr(panel, '_all_chats_list', panel.chats_list))
+            arch_full_names = list(getattr(panel, '_all_chat_names', panel.chat_names))
+            arch_displayed_chats: list = []
+            arch_displayed_names: list = []
             panel.conversations_list.DeleteAllItems()
-            for i, chat in enumerate(panel.chats_list):
-                name = panel.chat_names[i]
+            for i, chat in enumerate(arch_full_chats):
+                name = arch_full_names[i]
                 unread = int(chat.get("unreadCount") or 0)
                 if unread > 0:
                     unread_str = (
@@ -2163,6 +2278,10 @@ class MainWindow(wx.Frame):
                 if preview:
                     item_text += f" {preview}"
                 panel.conversations_list.Append((item_text,))
+                arch_displayed_chats.append(chat)
+                arch_displayed_names.append(name)
+            panel.chats_list = arch_displayed_chats
+            panel.chat_names = arch_displayed_names
 
     def monitor_internet_connection(self):
         while True:

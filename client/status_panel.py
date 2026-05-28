@@ -315,16 +315,22 @@ class StatusPanel(wx.Panel):
         threading.Thread(target=self._load_statuses, daemon=True).start()
 
     def _load_statuses(self):
+        """
+        Fetch WhatsApp statuses via the dedicated findStatusMessage endpoint.
+
+        Uses POST /chat/findStatusMessage/{instance} with an empty filter to
+        retrieve all available status messages in one call.
+        """
         mw   = self.main_window
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
         try:
             url = (
                 f"{mw.evolution_server}:{mw.evolution_port}"
-                f"/status/findStatuses/{mw.token}"
+                f"/chat/findStatusMessage/{mw.token}"
             )
-            headers = {"apikey": mw.token}
-            resp = requests.get(url, headers=headers, timeout=10)
+            headers = {"apikey": mw.token, "Content-Type": "application/json"}
+            resp = requests.post(url, json={}, headers=headers, timeout=15)
             if resp.status_code in (200, 201):
                 my_statuses, contacts = self._parse_statuses(resp.json(), i18n)
             else:
@@ -349,6 +355,7 @@ class StatusPanel(wx.Panel):
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
+            # Legacy path: dict with 'statuses' or 'records' wrapper key
             items = data.get("statuses", data.get("records", []))
         else:
             return my_statuses, contacts
@@ -396,29 +403,63 @@ class StatusPanel(wx.Panel):
         self._status_list.DeleteAllItems()
         self._status_list.Append((i18n.t("status_loading"),))
 
+    @staticmethod
+    def _latest_ts(entry: dict) -> int:
+        """Return the highest messageTimestamp among a contact's statuses."""
+        return max(
+            (int(s.get("messageTimestamp", 0) or 0) for s in entry.get("statuses", [])),
+            default=0,
+        )
+
+    def _status_preview(self, status: dict, i18n) -> str:
+        """Return a short human-readable preview of a single status item."""
+        msg_type = status.get("messageType", "")
+        msg_obj  = status.get("message") or {}
+        if msg_type == "conversation":
+            return msg_obj.get("conversation", "")
+        if msg_type == "extendedTextMessage":
+            return (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+        if msg_type == "imageMessage":
+            cap = ((msg_obj.get("imageMessage") or {}).get("caption") or "").strip()
+            return f"{i18n.t('photo')}: {cap}" if cap else i18n.t("photo")
+        if msg_type == "videoMessage":
+            cap = ((msg_obj.get("videoMessage") or {}).get("caption") or "").strip()
+            return f"{i18n.t('video')}: {cap}" if cap else i18n.t("video")
+        return msg_type or ""
+
     def _populate_list(self, my_statuses: list, contacts: list):
         i18n = self.main_window.i18n
-        self._my_statuses         = my_statuses
-        self._status_contacts     = contacts
+
+        # Sort contacts by most-recent status timestamp (newest first)
+        contacts = sorted(contacts, key=self._latest_ts, reverse=True)
+        # Within each contact keep statuses newest-first too
+        for entry in contacts:
+            entry["statuses"] = sorted(
+                entry.get("statuses", []),
+                key=lambda s: int(s.get("messageTimestamp", 0) or 0),
+                reverse=True,
+            )
+
+        self._my_statuses          = my_statuses
+        self._status_contacts      = contacts
         self._selected_contact_idx = -1
-        self._list_is_loading     = False
+        self._list_is_loading      = False
         self._viewer_panel.Hide()
         self._status_list.DeleteAllItems()
 
         # ── Row 0: always "My Status" ─────────────────────────────────────
         self._status_list.Append((self._my_status_label(i18n),))
 
-        # ── Rows 1+: other people's statuses ─────────────────────────────
-        if contacts:
-            for entry in contacts:
-                count = len(entry.get("statuses", []))
-                name  = entry.get("name", "")
-                self._status_list.Append((f"{name} ({count})",))
-        elif not contacts:
-            # Show a hint only when there really are no other statuses
-            # (My Status row is always there so we never show "status_none"
-            #  as the sole item)
-            pass
+        # ── Rows 1+: one row per contact showing their latest status ──────
+        for entry in contacts:
+            name     = entry.get("name", "")
+            statuses = entry.get("statuses", [])
+            if statuses:
+                preview  = self._status_preview(statuses[0], i18n)
+                row_text = f"{name}: {preview}" if preview else name
+            else:
+                row_text = name
+            self._status_list.Append((row_text,))
 
         if self._status_list.GetItemCount() > 0:
             self._status_list.Focus(0)

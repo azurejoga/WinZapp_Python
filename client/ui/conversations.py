@@ -265,6 +265,14 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._action_save_as_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._action_save_as_btn.Hide()
 
+        # ── Download button (shown when media is not yet cached locally) ───
+        self._action_download_btn = wx.Button(
+            self.conversation_panel, label=i18n.t("download")
+        )
+        self._action_download_btn.Bind(wx.EVT_BUTTON, self._on_action_download)
+        conv_sizer.Add(self._action_download_btn, 0, wx.LEFT | wx.BOTTOM, 5)
+        self._action_download_btn.Hide()
+
         # ── Business reply buttons container ───────────────────────────────
         self._buttons_container = wx.Panel(self.conversation_panel)
         self._buttons_container.SetSizer(wx.WrapSizer(wx.HORIZONTAL))
@@ -663,6 +671,7 @@ class ConversationsPanel(wx.Panel):
 
         self.audio_progress_label.SetLabel(i18n.t("audio_progress_label"))
         self._action_save_as_btn.SetLabel(i18n.t("save_as"))
+        self._action_download_btn.SetLabel(i18n.t("download"))
 
         if self.conversation is not None and self.conversation_panel.IsShown():
             if self.conversation_name:
@@ -1064,12 +1073,14 @@ class ConversationsPanel(wx.Panel):
 
         menu.AppendSeparator()
 
-        # ── Read / Unread ─────────────────────────────────────────────────
-        read_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_read')}\tCtrl+Shift+M")
-        self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_mark_read(j), read_item)
-
-        unread_item = menu.Append(wx.ID_ANY, i18n.t("mark_as_unread"))
-        self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_mark_unread(j), unread_item)
+        # ── Read / Unread — mutually exclusive: show only the applicable one ──
+        has_unread = int(chat.get("unreadCount") or 0) > 0
+        if has_unread:
+            read_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_read')}\tCtrl+Shift+M")
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_mark_read(j), read_item)
+        else:
+            unread_item = menu.Append(wx.ID_ANY, i18n.t("mark_as_unread"))
+            self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_mark_unread(j), unread_item)
 
         menu.AppendSeparator()
 
@@ -1181,7 +1192,9 @@ class ConversationsPanel(wx.Panel):
                 self._action_open_btn.SetLabel(self.main_window.i18n.t("open"))
                 self._action_open_btn.Show()
                 self._action_save_as_btn.Show()
-                self.conversation_panel.Layout()
+            else:
+                self._action_download_btn.Show()
+            self.conversation_panel.Layout()
 
         elif msg_type == "imageMessage":
             jpeg = (msg_obj.get("imageMessage") or {}).get("jpegThumbnail", "")
@@ -1201,7 +1214,12 @@ class ConversationsPanel(wx.Panel):
             jpeg = video.get("jpegThumbnail", "")
             self._try_show_thumbnail(jpeg)
             if not video.get("gifPlayback"):
-                self._action_save_as_btn.Show()
+                if is_downloaded:
+                    self._action_open_btn.SetLabel(self.main_window.i18n.t("open"))
+                    self._action_open_btn.Show()
+                    self._action_save_as_btn.Show()
+                else:
+                    self._action_download_btn.Show()
             self.conversation_panel.Layout()
 
         elif msg_type == "buttonsMessage":
@@ -1416,7 +1434,7 @@ class ConversationsPanel(wx.Panel):
             star_item,
         )
 
-        # Save As (media only, if already downloaded)
+        # Save As (media only, only when the file is already cached locally)
         _SAVEABLE = {"documentMessage", "imageMessage", "videoMessage"}
         if msg_type in _SAVEABLE and os.path.isfile(
             data_path("media", f"{msg_id}.wzmedia")
@@ -1467,6 +1485,7 @@ class ConversationsPanel(wx.Panel):
         self._media_bitmap.Hide()
         self._action_open_btn.Hide()
         self._action_save_as_btn.Hide()
+        self._action_download_btn.Hide()
         self._buttons_container.Hide()
         self._contact_converse_btn.Hide()
         self._contact_msg_jid = None
@@ -1518,7 +1537,7 @@ class ConversationsPanel(wx.Panel):
                 url=url,
                 style=wx.adv.HL_DEFAULT_STYLE,
             )
-            ctrl.Bind(wx.EVT_HYPERLINK, self._on_hyperlink_open)
+            ctrl.Bind(wx.adv.EVT_HYPERLINK, self._on_hyperlink_open)
             ctrl.Bind(wx.EVT_KEY_DOWN,  self._on_link_key_down)
             self._links_sizer.Add(ctrl, 0, wx.LEFT | wx.BOTTOM, 3)
 
@@ -1737,6 +1756,9 @@ class ConversationsPanel(wx.Panel):
         elif msg_type == "imageMessage":
             mime = (msg_obj.get("imageMessage") or {}).get("mimetype", "image/jpeg")
             ext = "." + (mime.split("/")[-1] if "/" in mime else "jpg")
+        elif msg_type == "videoMessage":
+            mime = (msg_obj.get("videoMessage") or {}).get("mimetype", "video/mp4")
+            ext = "." + (mime.split("/")[-1] if "/" in mime else "mp4")
         else:
             return
 
@@ -1832,6 +1854,48 @@ class ConversationsPanel(wx.Panel):
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _on_action_download(self, event):
+        """
+        Download the media file for the currently selected document or video.
+        Announces 'baixando...' via AO2, downloads in background, then replaces
+        the Download button with Open + Save As once the file is ready.
+        """
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg      = self._sorted_messages[index]
+        msg_type = msg.get("messageType", "")
+        msg_id   = msg.get("key", {}).get("id", "")
+        mw       = self.main_window
+        i18n     = mw.i18n
+        media_path = data_path("media", f"{msg_id}.wzmedia")
+
+        mw.output(i18n.t("downloading"))
+        self._action_download_btn.Disable()
+
+        def _run():
+            try:
+                if msg_type == "audioMessage":
+                    mw.handle_audio_message(msg)
+                else:
+                    mw.handle_media_message(msg)
+            except Exception:
+                pass
+
+            def _done():
+                self._action_download_btn.Enable()
+                if os.path.isfile(media_path) and os.path.getsize(media_path) > 0:
+                    # File ready — swap Download for Open + Save As
+                    self._action_download_btn.Hide()
+                    self._action_open_btn.SetLabel(i18n.t("open"))
+                    self._action_open_btn.Show()
+                    self._action_save_as_btn.Show()
+                    self.conversation_panel.Layout()
+
+            wx.CallAfter(_done)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     # ── Audio / video playback ──────────────────────────────────────────────
 
     def _toggle_playback(self, msg_id, duration_seconds, msg, file_path, audio_ext):
@@ -1841,12 +1905,13 @@ class ConversationsPanel(wx.Panel):
         """
         # Same item: toggle play / pause
         if msg_id == self._current_audio_id and self._audio_stream is not None:
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
             if self._is_audio_playing:
-                self._audio_stream.pause()
+                _ctrl.pause()
                 self._is_audio_playing = False
                 self._audio_timer.Stop()
             else:
-                self._audio_stream.play()
+                _ctrl.play()
                 self._is_audio_playing = True
                 self._audio_timer.Start(200)
             return
@@ -1919,10 +1984,13 @@ class ConversationsPanel(wx.Panel):
                 return
 
         # ── Start playback ───────────────────────────────────────────────────
+        # When Tempo FX is active the decode stream has no audio output of its
+        # own; playback must be started on the Tempo wrapper instead.
         self._audio_stream_duration = int(duration_seconds)
         self._current_audio_id = msg_id
         try:
-            self._audio_stream.play()
+            playback_ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            playback_ctrl.play()
         except Exception:
             self._stop_audio()
             return
@@ -1936,13 +2004,19 @@ class ConversationsPanel(wx.Panel):
     def _stop_audio(self):
         if self._audio_timer.IsRunning():
             self._audio_timer.Stop()
+        # Stop the Tempo FX controller first (it owns the audio output channel)
+        if self._audio_tempo_ctrl is not None:
+            try:
+                self._audio_tempo_ctrl.stop()
+            except Exception:
+                pass
+            self._audio_tempo_ctrl = None
         if self._audio_stream is not None:
             try:
                 self._audio_stream.stop()
             except Exception:
                 pass
             self._audio_stream = None
-        self._audio_tempo_ctrl = None
         self._is_audio_playing = False
         self._current_audio_id = None
         if self._audio_temp_file and os.path.exists(self._audio_temp_file):
@@ -1956,8 +2030,9 @@ class ConversationsPanel(wx.Panel):
         if self._audio_stream is None:
             return
         try:
-            pos   = self._audio_stream.get_position()
-            total = self._audio_stream.get_length()
+            _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            pos   = _ctrl.get_position()
+            total = _ctrl.get_length()
             if total > 0:
                 if pos >= total:
                     # Save the ID before _stop_audio() clears it
@@ -2432,7 +2507,13 @@ class ConversationsPanel(wx.Panel):
         jid      = conversation.get("remoteJid", "")
         mw       = self.main_window
         i18n     = mw.i18n
-        note     = format_number(jid)
+        # Default note: resolved contact name, falling back to formatted number
+        note = (
+            mw._resolve_contact_name(conversation)
+            or mw.find_name_through_messages(conversation)
+            or conversation.get("pushName", "")
+            or format_number(jid)
+        )
 
         try:
             if jid.endswith("@g.us"):
@@ -2724,8 +2805,128 @@ class ConversationsPanel(wx.Panel):
         )
 
     def _on_menu_forward(self, msg: dict):
-        # Forward not yet fully implemented — no-op for now
-        pass
+        """Open a conversation-picker dialog and forward *msg* to the chosen chat."""
+        mw   = self.main_window
+        i18n = mw.i18n
+
+        # ── Collect available conversations ───────────────────────────────────
+        panel       = mw.conversations_panel
+        all_chats   = list(getattr(panel, "_all_chats_list", panel.chats_list))
+        all_names   = list(getattr(panel, "_all_chat_names", panel.chat_names))
+        if not all_chats:
+            return
+
+        # ── Build a simple picker dialog ──────────────────────────────────────
+        dlg = wx.Dialog(
+            self,
+            title=i18n.t("forward_message"),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+            size=(400, 480),
+        )
+        p     = wx.Panel(dlg)
+        vsz   = wx.BoxSizer(wx.VERTICAL)
+
+        search_field = wx.TextCtrl(p, style=wx.TE_PROCESS_ENTER)
+        search_field.SetHint(i18n.t("search_conversations"))
+        vsz.Add(search_field, 0, wx.EXPAND | wx.ALL, 6)
+
+        lst = wx.ListBox(p, choices=all_names, style=wx.LB_SINGLE)
+        vsz.Add(lst, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+
+        btn_sizer  = wx.StdDialogButtonSizer()
+        ok_btn     = wx.Button(p, wx.ID_OK,     label=i18n.t("forward_message"))
+        cancel_btn = wx.Button(p, wx.ID_CANCEL, label=i18n.t("cancel"))
+        btn_sizer.AddButton(ok_btn)
+        btn_sizer.AddButton(cancel_btn)
+        btn_sizer.Realize()
+        vsz.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 6)
+
+        p.SetSizer(vsz)
+        dlg_sz = wx.BoxSizer(wx.VERTICAL)
+        dlg_sz.Add(p, 1, wx.EXPAND)
+        dlg.SetSizer(dlg_sz)
+        dlg.Layout()
+
+        # Filter list as user types
+        _filtered_chats = list(all_chats)
+        _filtered_names = list(all_names)
+
+        def _on_search(event):
+            nonlocal _filtered_chats, _filtered_names
+            q = search_field.GetValue().strip().lower()
+            if q:
+                pairs = [(c, n) for c, n in zip(all_chats, all_names)
+                         if q in n.lower()]
+            else:
+                pairs = list(zip(all_chats, all_names))
+            _filtered_chats = [c for c, _ in pairs]
+            _filtered_names = [n for _, n in pairs]
+            lst.Set(_filtered_names)
+            if _filtered_names:
+                lst.SetSelection(0)
+
+        search_field.Bind(wx.EVT_TEXT, _on_search)
+        if all_names:
+            lst.SetSelection(0)
+        ok_btn.SetDefault()
+
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return
+
+        sel = lst.GetSelection()
+        dlg.Destroy()
+        if sel == wx.NOT_FOUND or sel >= len(_filtered_chats):
+            return
+
+        target_jid = _filtered_chats[sel].get("remoteJid", "")
+        if not target_jid:
+            return
+
+        # ── Extract forwardable content from the message ──────────────────────
+        msg_type = msg.get("messageType", "")
+        msg_obj  = msg.get("message") or {}
+
+        if msg_type in ("conversation", "textMessage"):
+            text = (
+                msg_obj.get("conversation")
+                or (msg_obj.get("extendedTextMessage") or {}).get("text")
+                or ""
+            )
+            if text:
+                import uuid
+                local_id = str(uuid.uuid4())
+                from core.message_queue import PendingMessage
+                mw.message_queue.enqueue(
+                    PendingMessage(local_id=local_id, jid=target_jid, text=text)
+                )
+        elif msg_type == "extendedTextMessage":
+            text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
+            if text:
+                import uuid
+                local_id = str(uuid.uuid4())
+                from core.message_queue import PendingMessage
+                mw.message_queue.enqueue(
+                    PendingMessage(local_id=local_id, jid=target_jid, text=text)
+                )
+        else:
+            # For media types, try to forward caption or a type label
+            caption = ""
+            for sub_key in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
+                sub = msg_obj.get(sub_key) or {}
+                if sub:
+                    caption = sub.get("caption", "")
+                    break
+            if not caption:
+                # No text content to forward — nothing to do
+                pass
+            else:
+                import uuid
+                local_id = str(uuid.uuid4())
+                from core.message_queue import PendingMessage
+                mw.message_queue.enqueue(
+                    PendingMessage(local_id=local_id, jid=target_jid, text=caption)
+                )
 
     def _on_menu_star(self, msg: dict):
         # Star not yet fully implemented — no-op for now

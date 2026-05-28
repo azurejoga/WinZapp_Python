@@ -90,19 +90,23 @@ class SettingsDialog(wx.Dialog):
         self._messages_page_size_field = wx.TextCtrl(self._ui_page, style=wx.TE_DONTWRAP)
         ui_sizer.Add(self._messages_page_size_field, 0, wx.EXPAND | wx.ALL, 8)
 
-        ui_sizer.Add(
-            wx.StaticText(self._ui_page, label=i18n.t("ui_focus_label")),
-            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
-        )
+        # Wrap radio buttons in a StaticBox so NVDA reads the group label when
+        # the user tabs into them.  A plain StaticText label is not sufficient
+        # for screen readers to announce group membership.
+        self._focus_box = wx.StaticBox(self._ui_page, label=i18n.t("ui_focus_label"))
+        focus_sizer = wx.StaticBoxSizer(self._focus_box, wx.VERTICAL)
+
         self._focus_message_field_rb = wx.RadioButton(
-            self._ui_page, label=i18n.t("ui_focus_message_field"), style=wx.RB_GROUP
+            self._focus_box, label=i18n.t("ui_focus_message_field"), style=wx.RB_GROUP
         )
-        ui_sizer.Add(self._focus_message_field_rb, 0, wx.LEFT | wx.TOP, 8)
+        focus_sizer.Add(self._focus_message_field_rb, 0, wx.LEFT | wx.TOP, 5)
 
         self._focus_unread_or_last_rb = wx.RadioButton(
-            self._ui_page, label=i18n.t("ui_focus_unread_or_last")
+            self._focus_box, label=i18n.t("ui_focus_unread_or_last")
         )
-        ui_sizer.Add(self._focus_unread_or_last_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 8)
+        focus_sizer.Add(self._focus_unread_or_last_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
+
+        ui_sizer.Add(focus_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
@@ -346,6 +350,7 @@ class SettingsDialog(wx.Dialog):
         self._autostart_check.SetLabel(i18n.t("autostart_label"))
         self._tray_icon_check.SetLabel(i18n.t("tray_show_icon"))
         self._updates_check.SetLabel(i18n.t("updates_label"))
+        self._focus_box.SetLabel(i18n.t("ui_focus_label"))
         self._focus_message_field_rb.SetLabel(i18n.t("ui_focus_message_field"))
         self._focus_unread_or_last_rb.SetLabel(i18n.t("ui_focus_unread_or_last"))
         self._ok_btn.SetLabel(i18n.t("ok"))
