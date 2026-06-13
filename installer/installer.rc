@@ -5,10 +5,10 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "installer.manifest"
 
 IDD_INSTALL DIALOGEX 0, 0, 310, 145
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Instalar WinZapp"
+CAPTION "Instalador do WinZapp"
 FONT 9, "Segoe UI"
 BEGIN
-    LTEXT           "Pasta de instalação:", -1, 7, 7, 120, 9
+    LTEXT           "Pasta de instalação:", IDC_PATH_LABEL, 7, 7, 120, 9
     EDITTEXT        IDC_INSTALL_PATH, 7, 18, 220, 13, ES_AUTOHSCROLL
     PUSHBUTTON      "Procurar...", IDC_BROWSE, 233, 17, 70, 14
     AUTOCHECKBOX    "Criar atalho na área de trabalho", IDC_DESKTOP_SC,

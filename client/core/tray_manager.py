@@ -12,8 +12,9 @@ import wx.adv
 from core.i18n import I18n
 from app_paths import resource_path
 
-_ID_OPEN = wx.NewIdRef(count=1)
-_ID_EXIT = wx.NewIdRef(count=1)
+_ID_OPEN    = wx.NewIdRef(count=1)
+_ID_OFFLINE = wx.NewIdRef(count=1)
+_ID_EXIT    = wx.NewIdRef(count=1)
 
 
 class TrayIcon(wx.adv.TaskBarIcon):
@@ -28,8 +29,9 @@ class TrayIcon(wx.adv.TaskBarIcon):
         self._icon = self._load_icon()
 
         self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self._on_activate)
-        self.Bind(wx.EVT_MENU, self._on_open, id=_ID_OPEN)
-        self.Bind(wx.EVT_MENU, self._on_exit, id=_ID_EXIT)
+        self.Bind(wx.EVT_MENU, self._on_open,           id=_ID_OPEN)
+        self.Bind(wx.EVT_MENU, self._on_toggle_offline, id=_ID_OFFLINE)
+        self.Bind(wx.EVT_MENU, self._on_exit,           id=_ID_EXIT)
 
         self.update_tooltip()
 
@@ -116,11 +118,13 @@ class TrayIcon(wx.adv.TaskBarIcon):
         Truncated to 127 characters (Windows NOTIFYICONDATA.szTip limit).
         """
         i18n   = self.i18n
+        parts  = ["WinZapp"]
+        if getattr(self.main_window, "offline_mode", False):
+            parts.append(i18n.t("tray_offline_mode"))
         status = getattr(self.main_window, "_tray_status", "")
         if status:
-            prefix = f"WinZapp | {status} | "
-        else:
-            prefix = "WinZapp | "
+            parts.append(status)
+        prefix = " | ".join(parts) + " | "
 
         if total == 0:
             return (prefix + i18n.t("tray_no_unread"))[:127]
@@ -150,6 +154,8 @@ class TrayIcon(wx.adv.TaskBarIcon):
         i18n = self.i18n
         menu = wx.Menu()
         menu.Append(_ID_OPEN, i18n.t("tray_open"))
+        offline_item = menu.AppendCheckItem(_ID_OFFLINE, i18n.t("tray_offline_mode"))
+        offline_item.Check(bool(self.main_window.offline_mode))
         menu.AppendSeparator()
         menu.Append(_ID_EXIT, i18n.t("tray_exit"))
         return menu
@@ -162,6 +168,9 @@ class TrayIcon(wx.adv.TaskBarIcon):
 
     def _on_open(self, event):
         wx.CallAfter(self.main_window.restore_window)
+
+    def _on_toggle_offline(self, event):
+        wx.CallAfter(self.main_window.toggle_offline_mode)
 
     def _on_exit(self, event):
         wx.CallAfter(self.main_window.real_exit)

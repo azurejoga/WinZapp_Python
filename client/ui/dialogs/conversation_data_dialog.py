@@ -219,10 +219,7 @@ class ConversationDataDialog(wx.Dialog):
             p_phone = format_number(p_jid)
             # Try to resolve a name from contacts
             contact = self._mw.contacts.get(p_jid, {})
-            p_name  = (
-                contact.get("name") or contact.get("pushName")
-                or contact.get("verifiedName") or p_phone
-            )
+            p_name  = contact.get("pushName") or p_phone
             is_admin = "admin" if p.get("admin") else ""
             if is_admin and my_jid and (p_jid == my_jid or p_jid.split("@")[0] == my_jid.split("@")[0]):
                 user_is_admin = True

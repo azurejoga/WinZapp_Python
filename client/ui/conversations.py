@@ -1361,7 +1361,7 @@ class ConversationsPanel(wx.Panel):
         menu.AppendSeparator()
 
         # Copy text (only for text messages)
-        _TEXT_TYPES = ("conversation", "extendedTextMessage", "textMessage")
+        _TEXT_TYPES = ("conversation", "extendedTextMessage")
         if msg_type in _TEXT_TYPES:
             copy_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_message_text')}\tCtrl+C")
             self.Bind(
@@ -2234,7 +2234,7 @@ class ConversationsPanel(wx.Panel):
         # ── Document ─────────────────────────────────────────────────────────
         if msg_type == "documentMessage":
             doc      = msg_obj.get("documentMessage") or {}
-            filename = doc.get("fileName") or doc.get("title") or "documento"
+            filename = doc.get("fileName") or doc.get("title") or i18n.t("document")
             size_str = self._format_filesize(doc.get("fileLength"))
             msg_id   = msg.get("key", {}).get("id", "")
             progress = self._download_progress.get(msg_id)
@@ -2318,7 +2318,7 @@ class ConversationsPanel(wx.Panel):
             statuses = []
             for u in updates:
                 if isinstance(u, dict):
-                    st = u.get("status") or u.get("ack") or ""
+                    st = u.get("status") or ""
                     statuses.append(str(st).upper())
             for s in statuses:
                 if "READ" in s:
@@ -2342,8 +2342,7 @@ class ConversationsPanel(wx.Panel):
         if lookup_jid:
             contact = self.main_window.contacts.get(lookup_jid)
             if contact:
-                n = (contact.get("name") or contact.get("fullName")
-                     or contact.get("verifiedName") or contact.get("pushName") or "")
+                n = contact.get("pushName") or ""
                 if n and not n.isdigit():
                     return n
         push = msg.get("pushName", "")
@@ -2413,8 +2412,7 @@ class ConversationsPanel(wx.Panel):
         mw = self.main_window
         contact = mw.contacts.get(participant)
         if contact:
-            name = (contact.get("name") or contact.get("fullName") or
-                    contact.get("verifiedName") or contact.get("pushName") or "")
+            name = contact.get("pushName") or ""
             if name:
                 return name
         return format_number(participant) or participant
@@ -2522,36 +2520,13 @@ class ConversationsPanel(wx.Panel):
             or format_number(jid)
         )
 
+        # Evolution API v2's fetchProfile exposes no presence/last-seen data,
+        # so for private chats the note stays as the resolved contact name.
         try:
             if jid.endswith("@g.us"):
                 data = mw.get_group_info(jid)
                 size = data.get("size", 0)
                 note = i18n.t("group_size").format(count=size)
-            else:
-                data = mw.get_contact_profile(jid)
-                if data.get("presence") == "available":
-                    note = i18n.t("online_status")
-                else:
-                    ls = data.get("lastSeen") or data.get("lastKnownPresence")
-                    if ls and isinstance(ls, (int, float, str)):
-                        try:
-                            dt  = datetime.fromtimestamp(int(ls))
-                            now = datetime.now()
-                            if dt.date() == now.date():
-                                note = i18n.t("last_seen_today").format(
-                                    time=dt.strftime("%H:%M")
-                                )
-                            elif (now.date() - dt.date()).days == 1:
-                                note = i18n.t("last_seen_yesterday").format(
-                                    time=dt.strftime("%H:%M")
-                                )
-                            else:
-                                note = i18n.t("last_seen_date").format(
-                                    date=dt.strftime(i18n.t("date_fmt")),
-                                    time=dt.strftime("%H:%M"),
-                                )
-                        except Exception:
-                            pass
         except Exception:
             pass
 
@@ -2721,7 +2696,7 @@ class ConversationsPanel(wx.Panel):
         text = ""
         if msg_type == "conversation":
             text = msg_obj.get("conversation", "")
-        elif msg_type in ("extendedTextMessage", "textMessage"):
+        elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
         if text:
             try:
@@ -2756,10 +2731,7 @@ class ConversationsPanel(wx.Panel):
         mw = self.main_window
         contact = mw.contacts.get(participant_jid)
         if contact:
-            name = (
-                contact.get("name") or contact.get("fullName")
-                or contact.get("verifiedName") or contact.get("pushName") or ""
-            )
+            name = contact.get("pushName") or ""
             if name:
                 return name
         if msg is not None:
@@ -2790,7 +2762,7 @@ class ConversationsPanel(wx.Panel):
 
     def _on_menu_goto_quoted(self, msg: dict, ctx: dict):
         """Move focus in the messages list to the quoted message."""
-        quoted_id = ctx.get("stanzaId") or ctx.get("quotedMessageId") or ""
+        quoted_id = ctx.get("stanzaId") or ""
         if not quoted_id:
             self._show_quoted_not_found_error()
             return
@@ -2898,12 +2870,8 @@ class ConversationsPanel(wx.Panel):
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
 
-        if msg_type in ("conversation", "textMessage"):
-            text = (
-                msg_obj.get("conversation")
-                or (msg_obj.get("extendedTextMessage") or {}).get("text")
-                or ""
-            )
+        if msg_type == "conversation":
+            text = msg_obj.get("conversation") or ""
             if text:
                 import uuid
                 local_id = str(uuid.uuid4())
@@ -3290,7 +3258,7 @@ class ConversationsPanel(wx.Panel):
         msg_type = msg.get("messageType", "")
         msg_obj  = msg.get("message") or {}
         text = ""
-        if msg_type in ("conversation", "textMessage"):
+        if msg_type == "conversation":
             text = msg_obj.get("conversation", "")
         elif msg_type == "extendedTextMessage":
             text = (msg_obj.get("extendedTextMessage") or {}).get("text", "")
@@ -3521,8 +3489,7 @@ class ConversationsPanel(wx.Panel):
             return
         local_id = str(uuid.uuid4())
         name = (
-            contact.get("name") or contact.get("pushName")
-            or contact.get("verifiedName")
+            contact.get("pushName")
             or format_number(contact.get("remoteJid", ""))
         )
         virtual_msg = {

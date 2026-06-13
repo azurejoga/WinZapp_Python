@@ -100,6 +100,8 @@ class MainWindow(wx.Frame):
             self._check_first_run()
 
         self.offline_mode = False
+        # Status text shown in the title bar and tray tooltip (e.g. "sincronizando")
+        self._tray_status = ""
 
         #Play startup sound (skipped in background mode)
         if not self.background_mode:
@@ -159,9 +161,6 @@ class MainWindow(wx.Frame):
         self.SetSizer(frame_sizer)
 
         self.create_accelerator_table()
-
-        # ── Status tracking (shown in title and tray tooltip) ─────────────────
-        self._tray_status = ""
 
         # ── Menu bar ──────────────────────────────────────────────────────────
         self._update_checker = None
@@ -226,11 +225,48 @@ class MainWindow(wx.Frame):
     def _set_status(self, status: str):
         """Update window title and tray tooltip to reflect current status."""
         self._tray_status = status
-        app_name = self.i18n.t("app_name")
-        if status:
-            self.SetTitle(f"{app_name} - {status}")
+        self._update_title()
+        if getattr(self, "tray_icon", None) is not None:
+            self.tray_icon.update_tooltip()
+
+    def _update_title(self):
+        """
+        Rebuild the frame title from the app name, the number of conversations
+        with unread messages and the current status, e.g.:
+          "WinZapp"
+          "WinZapp (2)"
+          "WinZapp (2) | modo offline"
+          "WinZapp (3) | baixando mídias"
+        """
+        title   = self.i18n.t("app_name")
+        deleted = set(self.settings.get("deleted_chats", []))
+        unread_chats = sum(
+            1 for jid, chat in self.chats.items()
+            if jid not in deleted and int(chat.get("unreadCount") or 0) > 0
+        )
+        if unread_chats:
+            title += f" ({unread_chats})"
+        if self.offline_mode:
+            title += f" | {self.i18n.t('tray_offline_mode')}"
+        if self._tray_status:
+            title += f" | {self._tray_status}"
+        self.SetTitle(title)
+
+    def toggle_offline_mode(self):
+        """
+        Toggle the user-controlled offline mode (tray menu item).
+        While offline the outgoing message queue is suspended; disabling it
+        wakes the queue so pending messages are sent immediately.
+        """
+        self.offline_mode = not self.offline_mode
+        self.offline_mode_sound.play()
+        if self.offline_mode:
+            self.output(self.i18n.t("offline_mode_enabled"), interrupt=True)
         else:
-            self.SetTitle(app_name)
+            self.output(self.i18n.t("offline_mode_disabled"), interrupt=True)
+            if getattr(self, "message_queue", None) is not None:
+                self.message_queue.flush()
+        self._update_title()
         if getattr(self, "tray_icon", None) is not None:
             self.tray_icon.update_tooltip()
 
@@ -405,6 +441,11 @@ class MainWindow(wx.Frame):
         msg_id     = key.get("id", "")
 
         if not remote_jid:
+            return
+
+        # Statuses (stories) arrive as messages on status@broadcast; they are
+        # handled by the Status tab, not as a conversation.
+        if remote_jid.endswith("@broadcast"):
             return
 
         # ── Ensure the chat record exists ─────────────────────────────────────
@@ -849,13 +890,8 @@ class MainWindow(wx.Frame):
             self.archived_conversations_panel.refresh_labels()
         if hasattr(self, "status_panel"):
             self.status_panel.refresh_labels()
-        # Update frame title (keep any suffix that might be present during sync)
-        current_title = self.GetTitle()
-        if " - " in current_title:
-            suffix = current_title.split(" - ", 1)[1]
-            self.SetTitle(f"{self.i18n.t('app_name')} - {suffix}")
-        else:
-            self.SetTitle(self.i18n.t("app_name"))
+        # Update frame title (unread indicator + any status suffix)
+        self._update_title()
         self.main_panel.Layout()
         # Refresh tray icon tooltip with new language
         if self.tray_icon is not None:
@@ -1187,7 +1223,7 @@ class MainWindow(wx.Frame):
 
     def wait_messages_set(self):
         if not self.background_mode:
-            self.SetTitle(f"{self.i18n.t('app_name')} - {self.i18n.t('preparing_to_sync')}")
+            self._set_status(self.i18n.t("preparing_to_sync"))
 
     def create_basic_files(self):
         data_dir = data_path("")
@@ -1242,7 +1278,8 @@ class MainWindow(wx.Frame):
             response_data = response.json()
             for chat in response_data:
                 jid = self._normalize_jid(chat.get("remoteJid", ""))
-                if not jid:
+                # Skip status@broadcast — statuses are shown in the Status tab
+                if not jid or jid.endswith("@broadcast"):
                     continue
                 if jid not in chats:
                     if "messages" not in chat:
@@ -1272,7 +1309,7 @@ class MainWindow(wx.Frame):
              and merge any messages from the @c.us entry into it.
 
           2. @lid (Linked-Device ID) vs @s.whatsapp.net when the @lid chat's
-             messages contain a remoteJidAlt / senderPn bridge field that maps
+             messages contain a key.remoteJidAlt bridge field that maps
              back to a phone-number JID already present in the chats dict.
              We merge the @lid messages into the @s.whatsapp.net entry and drop
              the @lid duplicate.
@@ -1450,23 +1487,23 @@ class MainWindow(wx.Frame):
 
         if self.IsShown():
             self.add_chats_to_ui()
-        # Refresh tray tooltip whenever chat list / unread counts change
+        # Refresh title and tray tooltip whenever chat list / unread counts change
+        self._update_title()
         if getattr(self, "tray_icon", None) is not None:
             self.tray_icon.update_tooltip()
 
     def _find_alt_jid_from_messages(self, chat):
         """
         When a chat is addressed as @lid, find the corresponding phone-number
-        JID by scanning message keys for the bridge fields that Baileys/
-        Evolution API sets when addressingMode == "lid":
-          - remoteJidAlt  (primary field, e.g. "5511987654321@s.whatsapp.net")
-          - senderPn      (fallback field used in some Evolution versions)
+        JID by scanning message keys for the key.remoteJidAlt bridge field
+        that Evolution API v2 sets when addressingMode == "lid"
+        (e.g. "5511987654321@s.whatsapp.net").
         Returns the alt JID string, or None if not found.
         """
         for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
             key = msg.get("key", {})
             if not key.get("fromMe") and key.get("addressingMode") == "lid":
-                alt = key.get("remoteJidAlt") or key.get("senderPn", "")
+                alt = key.get("remoteJidAlt", "")
                 if alt:
                     return alt
         return None
@@ -1484,24 +1521,17 @@ class MainWindow(wx.Frame):
         stored for each contact.  When a chat's remoteJid is @lid but the
         contact is stored under the phone-number JID (or vice-versa), the
         direct lookup fails.  In that case we scan the chat's message keys
-        for the remoteJidAlt / senderPn bridge field that Baileys sets when
-        addressingMode == "lid", giving us the alternate JID to try.
-
-        Field priority within a contact object (Baileys / Evolution API):
-          name > fullName > verifiedName
-          (pushName is the WhatsApp profile name, NOT the address-book name.)
+        for the key.remoteJidAlt bridge field that Evolution API v2 sets
+        when addressingMode == "lid", giving us the alternate JID to try.
         """
         remoteJid = chat.get("remoteJid", "")
         if not remoteJid or remoteJid.endswith("@g.us"):
             return None  # groups don't have address-book entries
 
         def _name_from_contact(c):
-            # Evolution API v2 stores the address-book name in Contact.pushName
-            # (derived from Baileys contact.name || contact.verifiedName).
-            # Prefer explicit name fields; fall back to pushName of the contact
-            # object (NOT the chat/message pushName, which is the WA profile name).
-            return (c.get("name") or c.get("fullName") or
-                    c.get("verifiedName") or c.get("pushName") or None)
+            # Evolution API v2 stores the contact name in Contact.pushName
+            # (derived from Baileys contact.name ?? contact.verifiedName).
+            return c.get("pushName") or None
 
         # 1. Direct lookup by chat's own remoteJid
         contact = self.contacts.get(remoteJid)
@@ -1822,11 +1852,29 @@ class MainWindow(wx.Frame):
             pass
 
     def mark_conversation_as_read(self, remote_jid: str):
-        """Mark conversation as read locally and notify the API."""
+        """Mark conversation as read locally and notify the API.
+
+        Evolution API v2 expects POST /chat/markMessageAsRead with
+        {"readMessages": [{"remoteJid", "fromMe", "id"}]} where "id" must be
+        a real message ID; we send the key of the newest incoming message.
+        """
         chat = self.chats.get(remote_jid)
-        if chat is not None:
-            chat["unreadCount"] = 0
-            wx.CallAfter(self.set_chats)
+        if chat is None:
+            return
+        chat["unreadCount"] = 0
+        wx.CallAfter(self.set_chats)
+
+        records = chat.get("messages", {}).get("messages", {}).get("records", [])
+        latest = max(
+            (m for m in records
+             if not m.get("key", {}).get("fromMe") and m.get("key", {}).get("id")),
+            key=lambda m: int(m.get("messageTimestamp", 0) or 0),
+            default=None,
+        )
+        if latest is None:
+            return
+        key = latest.get("key", {})
+
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
             f"/chat/markMessageAsRead/{self.token}"
@@ -1835,8 +1883,11 @@ class MainWindow(wx.Frame):
         try:
             requests.post(
                 url,
-                json={"lastMessages": [{"key": {"remoteJid": remote_jid,
-                                                 "fromMe": False, "id": ""}}]},
+                json={"readMessages": [{
+                    "remoteJid": key.get("remoteJid") or remote_jid,
+                    "fromMe":    False,
+                    "id":        key.get("id", ""),
+                }]},
                 headers=headers,
                 timeout=10,
             )
@@ -1868,14 +1919,15 @@ class MainWindow(wx.Frame):
         return {}
 
     def get_group_info(self, jid: str) -> dict:
-        """Fetch group metadata from Evolution API (runs on background thread)."""
+        """Fetch group metadata via GET /group/findGroupInfos?groupJid=...
+        (runs on background thread)."""
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
             f"/group/findGroupInfos/{self.token}"
         )
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
-            r = requests.post(url, json={"groupJid": jid}, headers=headers, timeout=10)
+            r = requests.get(url, params={"groupJid": jid}, headers=headers, timeout=10)
             if r.status_code in (200, 201):
                 return r.json() or {}
         except Exception:
@@ -1993,7 +2045,7 @@ class MainWindow(wx.Frame):
         )
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
-            requests.delete(url, json={"groupJid": jid}, headers=headers, timeout=10)
+            requests.delete(url, params={"groupJid": jid}, headers=headers, timeout=10)
         except Exception:
             pass
         # Archive instead of delete so the message history is preserved locally.
@@ -2017,13 +2069,8 @@ class MainWindow(wx.Frame):
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=30)
             if r.status_code in (200, 201):
-                data = r.json()
-                jid = (
-                    data.get("id")
-                    or data.get("groupJid")
-                    or data.get("remoteJid", "")
-                )
-                return True, jid
+                # v2 returns the Baileys GroupMetadata object; the JID is "id"
+                return True, r.json().get("id", "")
             return False, f"HTTP {r.status_code}: {r.text[:200]}"
         except Exception as exc:
             return False, str(exc)
@@ -2038,13 +2085,14 @@ class MainWindow(wx.Frame):
             f"/group/updateParticipant/{self.token}"
         )
         headers = {"apikey": self.token, "Content-Type": "application/json"}
+        # v2 expects numeric strings (phone numbers), not full JIDs
         payload = {
             "groupJid":    group_jid,
             "action":      "add",
-            "participants": participant_jids,
+            "participants": [j.split("@")[0] for j in participant_jids],
         }
         try:
-            r = requests.put(url, json=payload, headers=headers, timeout=15)
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
             if r.status_code in (200, 201):
                 return True, ""
             return False, f"HTTP {r.status_code}: {r.text[:200]}"
@@ -2093,10 +2141,7 @@ class MainWindow(wx.Frame):
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
         """Send a contact card as an attachment."""
-        name = (
-            contact_info.get("name") or contact_info.get("pushName")
-            or contact_info.get("verifiedName") or ""
-        )
+        name = contact_info.get("pushName") or ""
         jid = contact_info.get("remoteJid", "")
         phone_raw = jid.split("@")[0] if "@" in jid else jid
         phone_fmt  = format_number(jid)
@@ -2120,31 +2165,35 @@ class MainWindow(wx.Frame):
     # ── Message edit / delete-for-everyone ────────────────────────────────────
 
     def edit_message(self, remote_jid: str, message_id: str, new_text: str):
-        """Send an edited message to the Evolution API."""
+        """Send an edited message via POST /chat/updateMessage (Evolution API v2)."""
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/message/updateMessage/{self.token}"
+            f"/chat/updateMessage/{self.token}"
         )
         payload = {
-            "number":    remote_jid,
-            "key":       {"remoteJid": remote_jid, "fromMe": True, "id": message_id},
-            "text":      new_text,
+            "number": remote_jid,
+            "key":    {"remoteJid": remote_jid, "fromMe": True, "id": message_id},
+            "text":   new_text,
         }
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
-            requests.put(url, json=payload, headers=headers, timeout=15)
+            requests.post(url, json=payload, headers=headers, timeout=15)
         except Exception:
             pass
 
     def delete_message_for_everyone(self, remote_jid: str, message_id: str, from_me: bool):
-        """Delete a message for everyone via the Evolution API."""
+        """Delete a message for everyone via DELETE /chat/deleteMessageForEveryone.
+
+        Evolution API v2 expects a flat body: {"id", "fromMe", "remoteJid"}.
+        """
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
-            f"/message/deleteMessageForEveryone/{self.token}"
+            f"/chat/deleteMessageForEveryone/{self.token}"
         )
         payload = {
-            "number":    remote_jid,
-            "key":       {"remoteJid": remote_jid, "fromMe": from_me, "id": message_id},
+            "id":        message_id,
+            "fromMe":    from_me,
+            "remoteJid": remote_jid,
         }
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
@@ -2193,7 +2242,7 @@ class MainWindow(wx.Frame):
                 if isinstance(m, dict) and m.get("key", {}).get("id") == orig_id:
                     orig_type = m.get("messageType", "")
                     orig_obj  = m.get("message") or {}
-                    if orig_type in ("conversation", "textMessage"):
+                    if orig_type == "conversation":
                         orig_text = (orig_obj.get("conversation") or "")[:40]
                     elif orig_type == "extendedTextMessage":
                         orig_text = ((orig_obj.get("extendedTextMessage") or {}).get("text") or "")[:40]
@@ -2252,13 +2301,8 @@ class MainWindow(wx.Frame):
             h, m, sec = s // 3600, (s % 3600) // 60, s % 60
             return f"{h}:{m:02d}:{sec:02d}" if h > 0 else f"{m}:{sec:02d}"
 
-        if msg_type in ("conversation", "textMessage"):
-            content = (
-                msg_obj.get("conversation")
-                or (msg_obj.get("extendedTextMessage") or {}).get("text")
-                or last.get("messageBody")
-                or ""
-            )
+        if msg_type == "conversation":
+            content = msg_obj.get("conversation") or ""
             if len(content) > 60:
                 content = content[:57] + "..."
         elif msg_type == "extendedTextMessage":

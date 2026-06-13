@@ -64,17 +64,11 @@ def format_notification_body(msg: dict, i18n) -> str:
     sep      = i18n.t("decimal_separator")
 
     if not isinstance(msg_obj, dict):
-        body = msg.get("messageBody", "")
-        return body if body else i18n.t("notif_unsupported")
+        return i18n.t("notif_unsupported")
 
     # ── Text ──────────────────────────────────────────────────────────────────
-    if msg_type in ("conversation", "textMessage"):
-        text = (
-            msg_obj.get("conversation")
-            or (msg_obj.get("extendedTextMessage") or {}).get("text")
-            or msg.get("messageBody")
-            or ""
-        )
+    if msg_type == "conversation":
+        text = msg_obj.get("conversation") or ""
         # Truncate long text — Windows caps at ~256 chars in notification body
         if len(text) > 200:
             text = text[:197] + "..."
@@ -82,7 +76,7 @@ def format_notification_body(msg: dict, i18n) -> str:
 
     if msg_type == "extendedTextMessage":
         ext  = msg_obj.get("extendedTextMessage") or {}
-        text = ext.get("text") or msg.get("messageBody") or ""
+        text = ext.get("text") or ""
         if len(text) > 200:
             text = text[:197] + "..."
         return text
@@ -106,7 +100,7 @@ def format_notification_body(msg: dict, i18n) -> str:
     # ── Image ─────────────────────────────────────────────────────────────────
     if msg_type == "imageMessage":
         img     = msg_obj.get("imageMessage") or {}
-        caption = (img.get("caption") or msg.get("messageBody") or "").strip()
+        caption = (img.get("caption") or "").strip()
         if caption:
             if len(caption) > 150:
                 caption = caption[:147] + "..."
@@ -142,14 +136,8 @@ def format_notification_body(msg: dict, i18n) -> str:
         emoji    = reaction.get("text") or ""
         return i18n.t("notif_reaction").format(emoji=emoji)
 
-    # ── Buttons / list ────────────────────────────────────────────────────────
-    if msg_type in ("buttonsMessage", "listMessage"):
-        body = msg.get("messageBody") or ""
-        return body if body else i18n.t("notif_unsupported")
-
     # ── Fallback ──────────────────────────────────────────────────────────────
-    body = msg.get("messageBody") or ""
-    return body if body else i18n.t("notif_unsupported")
+    return i18n.t("notif_unsupported")
 
 
 def format_foreground_sender(msg: dict, main_window, i18n) -> str:
@@ -170,7 +158,7 @@ def format_foreground_sender(msg: dict, main_window, i18n) -> str:
             if p_jid:
                 c = main_window.contacts.get(p_jid, {})
                 participant_name = (
-                    c.get("name") or c.get("pushName") or format_number(p_jid)
+                    c.get("pushName") or format_number(p_jid)
                 )
         return participant_name or remote_jid.split("@")[0]
 
@@ -210,7 +198,7 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
             if p_jid:
                 c = main_window.contacts.get(p_jid, {})
                 participant_name = (
-                    c.get("name") or c.get("pushName") or format_number(p_jid)
+                    c.get("pushName") or format_number(p_jid)
                 )
         if not participant_name:
             participant_name = remote_jid.split("@")[0]

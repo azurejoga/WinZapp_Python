@@ -91,98 +91,59 @@ class WebSocketClient:
         """
         Handle real-time incoming messages from the Evolution API.
 
-        The event payload can arrive in several forms:
-          • {"data": {"messages": [...], "type": "notify"}}   (most common)
-          • {"data": [message_object, ...], "type": "notify"} (some versions)
-          • {"data": {<message fields>, "type": "notify"}}    (single message in data)
-          • {"messages": [...], "type": "notify"}             (no data wrapper)
-        We only process new messages and skip type=="append" (history replay).
+        In Evolution API v2 the websocket envelope is
+          {"event": "messages.upsert", "instance": ..., "data": {<message>}, ...}
+        where "data" is a single message object (key, pushName, message,
+        messageType, messageTimestamp, ...).
         """
         try:
-            data = info.get("data", {})
-
-            # Normalise: data may be a dict, list, or the message itself
-            if isinstance(data, dict):
-                event_type = data.get("type", "")
-                messages   = data.get("messages", [])
-                # Some versions embed the single message directly in "data"
-                if not messages and data.get("key"):
-                    messages = [data]
-            elif isinstance(data, list):
-                # Some Evolution versions send the messages array directly
-                event_type = info.get("type", "notify")
-                messages   = data
-            else:
-                event_type = ""
-                messages   = []
-
-            # Fallback: messages may be at the root of the info dict
-            if not messages:
-                messages = info.get("messages", [])
-                if not messages and info.get("key"):
-                    messages = [info]
-
-            # Skip historical sync replays; allow "notify" and unknown types
-            if event_type == "append":
+            msg = info.get("data", {})
+            if not isinstance(msg, dict) or not msg.get("key"):
                 return
-
-            if not isinstance(messages, list):
-                messages = [messages]
-
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    continue
-                # Skip reactions — they update an existing message, not a new one
-                if msg.get("messageType") == "reactionMessage":
-                    continue
-                # Skip messages sent by ourselves (fromMe=True means we sent it;
-                # the MessageQueue already handles those in the UI)
-                if msg.get("key", {}).get("fromMe", False):
-                    continue
-                wx.CallAfter(self.main_window.on_new_message, msg)
+            # Skip reactions — they update an existing message, not a new one
+            if msg.get("messageType") == "reactionMessage":
+                return
+            # Skip messages sent by ourselves (fromMe=True means we sent it;
+            # the MessageQueue already handles those in the UI)
+            if msg.get("key", {}).get("fromMe", False):
+                return
+            wx.CallAfter(self.main_window.on_new_message, msg)
 
         except Exception as e:
             print(f"[WebSocketClient] on_messages_upsert error: {e}")
 
     def on_contacts_update(self, info):
         """
-        Handle contacts.update for real-time 1:1 message notifications.
+        Handle contacts.update to keep contact names and pictures fresh.
 
-        In Evolution API, when a direct-message arrives the contact record is
-        updated (unread count, lastMessage) and contacts.update fires.  Group
-        messages continue to arrive via messages.upsert.
-
-        Payload expected:
-          {"data": [{"id": "<jid>", ..., "lastMessage": {...}}]}
-
-        on_new_message performs duplicate-ID detection, so even if
-        messages.upsert also fires for the same message it will be silently
-        skipped the second time.
+        Evolution API v2 emits this event with "data" being either a single
+        contact dict or a list of contact dicts:
+          {"remoteJid": ..., "pushName": ..., "profilePicUrl": ..., "instanceId": ...}
+        New messages (1:1 and group) arrive via messages.upsert.
         """
         try:
             data = info.get("data", [])
+            if isinstance(data, dict):
+                data = [data]
             if not isinstance(data, list):
                 return
+            updated = False
             for contact in data:
                 if not isinstance(contact, dict):
                     continue
-                jid = contact.get("id", "") or contact.get("remoteJid", "")
-                # Group chats are handled by messages.upsert
-                if not jid or jid.endswith("@g.us") or jid.endswith("@broadcast"):
+                jid = contact.get("remoteJid", "")
+                if not jid:
                     continue
-                last_msg = contact.get("lastMessage") or contact.get("msgs")
-                if isinstance(last_msg, list):
-                    last_msg = last_msg[-1] if last_msg else None
-                if not last_msg or not isinstance(last_msg, dict):
+                existing = self.main_window.contacts.get(jid)
+                if existing is None:
                     continue
-                key = last_msg.get("key", {})
-                if key.get("fromMe", False):
-                    continue
-                # Ensure remoteJid is present — some payloads omit it from lastMessage
-                if not key.get("remoteJid"):
-                    last_msg = dict(last_msg)
-                    last_msg["key"] = dict(key)
-                    last_msg["key"]["remoteJid"] = jid
-                wx.CallAfter(self.main_window.on_new_message, last_msg)
+                if contact.get("pushName"):
+                    existing["pushName"] = contact["pushName"]
+                    updated = True
+                if contact.get("profilePicUrl"):
+                    existing["profilePicUrl"] = contact["profilePicUrl"]
+            if updated:
+                # Refresh conversation names shown in the UI
+                wx.CallAfter(self.main_window.set_chats)
         except Exception as e:
             print(f"[WebSocketClient] on_contacts_update error: {e}")

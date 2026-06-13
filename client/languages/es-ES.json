@@ -52,6 +52,7 @@
     "sync_complete": "Conversaciones sincronizadas.",
     "offline_mode": "Modo sin conexión",
     "offline_mode_enabled": "Modo sin conexión activado. Algunas funciones pueden no estar disponibles.",
+    "offline_mode_disabled": "Modo sin conexión desactivado.",
     "connection_restored": "Conexión a internet restablecida.",
     "connection_lost": "Conexión a internet perdida.",
     "close_conversation": "&Cerrar conversación",

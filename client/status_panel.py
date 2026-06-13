@@ -316,32 +316,44 @@ class StatusPanel(wx.Panel):
 
     def _load_statuses(self):
         """
-        Fetch WhatsApp statuses via the dedicated findStatusMessage endpoint.
+        Fetch WhatsApp statuses (stories).
 
-        Uses POST /chat/findStatusMessage/{instance} with an empty filter to
-        retrieve all available status messages in one call.
+        In Evolution API v2 statuses are regular messages whose
+        key.remoteJid == "status@broadcast", retrieved with
+        POST /chat/findMessages/{instance} (paginated).
         """
         mw   = self.main_window
         i18n = mw.i18n
         wx.CallAfter(self._set_list_loading)
+        records = []
         try:
             url = (
                 f"{mw.evolution_server}:{mw.evolution_port}"
-                f"/chat/findStatusMessage/{mw.token}"
+                f"/chat/findMessages/{mw.token}"
             )
             headers = {"apikey": mw.token, "Content-Type": "application/json"}
-            resp = requests.post(url, json={}, headers=headers, timeout=15)
-            if resp.status_code in (200, 201):
-                my_statuses, contacts = self._parse_statuses(resp.json(), i18n)
-            else:
-                my_statuses, contacts = [], []
+            current_page = 1
+            total_pages  = 1
+            while current_page <= total_pages:
+                payload = {
+                    "where": {"key": {"remoteJid": "status@broadcast"}},
+                    "page":  current_page,
+                }
+                resp = requests.post(url, json=payload, headers=headers, timeout=15)
+                if resp.status_code not in (200, 201):
+                    break
+                messages    = resp.json().get("messages", {})
+                total_pages = messages.get("pages", 1)
+                records.extend(messages.get("records", []))
+                current_page += 1
         except Exception:
-            my_statuses, contacts = [], []
+            records = []
+        my_statuses, contacts = self._parse_statuses(records, i18n)
         wx.CallAfter(self._populate_list, my_statuses, contacts)
 
-    def _parse_statuses(self, data, i18n) -> tuple:
+    def _parse_statuses(self, items, i18n) -> tuple:
         """
-        Parse the API response and separate own statuses from others.
+        Separate own statuses from other people's.
 
         Returns
         -------
@@ -352,19 +364,7 @@ class StatusPanel(wx.Panel):
         my_statuses = []
         contacts    = []
 
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            # Try common wrapper keys used by different Evolution API versions
-            items = (
-                data.get("statuses")
-                or data.get("records")
-                or data.get("messages")
-                or data.get("statusMessages")
-                or data.get("data")
-                or []
-            )
-        else:
+        if not isinstance(items, list):
             return my_statuses, contacts
 
         # Group by participant JID (use participant over remoteJid for
@@ -398,8 +398,7 @@ class StatusPanel(wx.Panel):
         mw      = self.main_window
         contact = mw.contacts.get(jid)
         if contact:
-            name = (contact.get("name") or contact.get("fullName") or
-                    contact.get("verifiedName") or contact.get("pushName") or "")
+            name = contact.get("pushName") or ""
             if name:
                 return name
         return ""
@@ -827,13 +826,24 @@ class StatusPanel(wx.Panel):
         ).start()
 
     def _send_text_status_bg(self, text: str):
+        """POST /message/sendStatus (Evolution API v2).
+
+        Text statuses require backgroundColor and font (1-5); the status is
+        broadcast to all saved contacts (allContacts=True).
+        """
         mw  = self.main_window
         url = (
             f"{mw.evolution_server}:{mw.evolution_port}"
-            f"/message/sendText/{mw.token}"
+            f"/message/sendStatus/{mw.token}"
         )
         headers = {"apikey": mw.token, "Content-Type": "application/json"}
-        payload = {"number": "status@broadcast", "text": text}
+        payload = {
+            "type":            "text",
+            "content":         text,
+            "backgroundColor": "#25D366",
+            "font":            1,
+            "allContacts":     True,
+        }
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
             ok   = resp.status_code in (200, 201)
@@ -947,20 +957,25 @@ class StatusPanel(wx.Panel):
         elif ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
             media_type = "image"
         else:
-            media_type = "document"
+            # Evolution API v2 statuses only support text/image/audio/video
+            wx.CallAfter(
+                wx.MessageBox,
+                mw.i18n.t("status_error"),
+                mw.app_name,
+                wx.OK | wx.ICON_ERROR,
+            )
+            return
 
         url = (
             f"{mw.evolution_server}:{mw.evolution_port}"
-            f"/message/sendMedia/{mw.token}"
+            f"/message/sendStatus/{mw.token}"
         )
         headers = {"apikey": mw.token, "Content-Type": "application/json"}
         payload = {
-            "number":    "status@broadcast",
-            "mediatype": media_type,
-            "media":     data_b64,
-            "mimetype":  mimetype,
-            "fileName":  os.path.basename(path),
-            "caption":   caption,
+            "type":        media_type,
+            "content":     f"data:{mimetype};base64,{data_b64}",
+            "caption":     caption,
+            "allContacts": True,
         }
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)

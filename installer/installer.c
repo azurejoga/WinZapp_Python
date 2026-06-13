@@ -64,6 +64,89 @@ typedef struct {
 } ZipEOCD;
 #pragma pack(pop)
 
+/* ── Localised UI strings ─────────────────────────────────────────────────
+   The installer language follows the Windows display language:
+   Portuguese → pt-BR, Spanish → es-ES, anything else → en-US.            */
+
+typedef struct {
+    const wchar_t *title;          /* dialog caption                  */
+    const wchar_t *path_label;     /* "Installation folder:"          */
+    const wchar_t *browse;         /* "Browse..." button              */
+    const wchar_t *desktop_sc;     /* desktop-shortcut checkbox       */
+    const wchar_t *startmenu_sc;   /* start-menu-shortcut checkbox    */
+    const wchar_t *install;        /* "Install" button                */
+    const wchar_t *cancel;         /* "Cancel" button                 */
+    const wchar_t *browse_title;   /* folder-picker title             */
+    const wchar_t *err_no_folder;  /* empty-path warning              */
+    const wchar_t *extract_failed; /* extraction-failure message      */
+    const wchar_t *done_msg;       /* success message                 */
+    const wchar_t *done_title;     /* success message-box title       */
+    const wchar_t *err_fmt;        /* error format string (%s)        */
+    const wchar_t *err_title;      /* error message-box title         */
+} UiStrings;
+
+static const UiStrings STR_PT = {
+    L"Instalador do WinZapp",
+    L"Pasta de instalação:",
+    L"Procurar...",
+    L"Criar atalho na área de trabalho",
+    L"Criar atalho no menu Iniciar",
+    L"Instalar",
+    L"Cancelar",
+    L"Selecione a pasta de instalação",
+    L"Por favor, selecione uma pasta de instalação.",
+    L"Extração falhou.",
+    L"WinZapp foi instalado com sucesso!",
+    L"Instalação concluída",
+    L"Ocorreu um erro durante a instalação:\n%s",
+    L"Erro de instalação",
+};
+
+static const UiStrings STR_ES = {
+    L"Instalador de WinZapp",
+    L"Carpeta de instalación:",
+    L"Examinar...",
+    L"Crear acceso directo en el escritorio",
+    L"Crear acceso directo en el menú Inicio",
+    L"Instalar",
+    L"Cancelar",
+    L"Seleccione la carpeta de instalación",
+    L"Por favor, seleccione una carpeta de instalación.",
+    L"La extracción falló.",
+    L"¡WinZapp se instaló correctamente!",
+    L"Instalación completada",
+    L"Se produjo un error durante la instalación:\n%s",
+    L"Error de instalación",
+};
+
+static const UiStrings STR_EN = {
+    L"WinZapp Installer",
+    L"Installation folder:",
+    L"Browse...",
+    L"Create desktop shortcut",
+    L"Create Start menu shortcut",
+    L"Install",
+    L"Cancel",
+    L"Select the installation folder",
+    L"Please select an installation folder.",
+    L"Extraction failed.",
+    L"WinZapp was installed successfully!",
+    L"Installation complete",
+    L"An error occurred during installation:\n%s",
+    L"Installation error",
+};
+
+static const UiStrings *g_str = &STR_EN;
+
+static void select_language(void)
+{
+    switch (PRIMARYLANGID(GetUserDefaultUILanguage())) {
+    case LANG_PORTUGUESE: g_str = &STR_PT; break;
+    case LANG_SPANISH:    g_str = &STR_ES; break;
+    default:              g_str = &STR_EN; break;
+    }
+}
+
 /* ── Custom window messages ───────────────────────────────────────────── */
 
 #define WM_INSTALL_PROGRESS  (WM_USER + 1)   /* wParam=done, lParam=total */
@@ -337,7 +420,7 @@ static DWORD WINAPI install_thread(LPVOID param)
         free(p);
         if (!g_cancelled)
             SendMessage(g_hDlg, WM_INSTALL_ERROR, 0,
-                        (LPARAM)_wcsdup(L"Extração falhou."));
+                        (LPARAM)_wcsdup(g_str->extract_failed));
         return 0;
     }
 
@@ -381,6 +464,15 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_INITDIALOG: {
         g_hDlg = hDlg;
 
+        /* Apply localised strings (language follows the Windows UI language) */
+        SetWindowTextW(hDlg, g_str->title);
+        SetDlgItemTextW(hDlg, IDC_PATH_LABEL,   g_str->path_label);
+        SetDlgItemTextW(hDlg, IDC_BROWSE,       g_str->browse);
+        SetDlgItemTextW(hDlg, IDC_DESKTOP_SC,   g_str->desktop_sc);
+        SetDlgItemTextW(hDlg, IDC_STARTMENU_SC, g_str->startmenu_sc);
+        SetDlgItemTextW(hDlg, IDC_INSTALL,      g_str->install);
+        SetDlgItemTextW(hDlg, IDC_CANCEL,       g_str->cancel);
+
         wchar_t local_app[MAX_PATH];
         if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local_app))) {
             wchar_t def_path[MAX_PATH];
@@ -400,7 +492,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
         case IDC_BROWSE: {
             BROWSEINFOW bi = {0};
             bi.hwndOwner = hDlg;
-            bi.lpszTitle = L"Selecione a pasta de instalação";
+            bi.lpszTitle = g_str->browse_title;
             bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
             LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
             if (pidl) {
@@ -416,7 +508,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
             wchar_t install_dir[MAX_PATH];
             GetDlgItemTextW(hDlg, IDC_INSTALL_PATH, install_dir, MAX_PATH);
             if (!install_dir[0]) {
-                MessageBoxW(hDlg, L"Por favor, selecione uma pasta de instalação.",
+                MessageBoxW(hDlg, g_str->err_no_folder,
                             L"WinZapp", MB_OK | MB_ICONWARNING);
                 return TRUE;
             }
@@ -454,18 +546,17 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_INSTALL_DONE:
-        MessageBoxW(hDlg, L"WinZapp foi instalado com sucesso!",
-                    L"Instalação concluída", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(hDlg, g_str->done_msg,
+                    g_str->done_title, MB_OK | MB_ICONINFORMATION);
         EndDialog(hDlg, IDOK);
         return TRUE;
 
     case WM_INSTALL_ERROR: {
         wchar_t *err = (wchar_t *)lParam;
         wchar_t buf[512];
-        swprintf(buf, 512, L"Ocorreu um erro durante a instalação:\n%s",
-                 err ? err : L"");
+        swprintf(buf, 512, g_str->err_fmt, err ? err : L"");
         free(err);
-        MessageBoxW(hDlg, buf, L"Erro de instalação", MB_OK | MB_ICONERROR);
+        MessageBoxW(hDlg, buf, g_str->err_title, MB_OK | MB_ICONERROR);
         EndDialog(hDlg, IDABORT);
         return TRUE;
     }
@@ -484,6 +575,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev,
                    LPSTR lpCmdLine, int nCmdShow)
 {
     (void)hPrev; (void)lpCmdLine; (void)nCmdShow;
+
+    select_language();
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_PROGRESS_CLASS };
     InitCommonControlsEx(&icc);
