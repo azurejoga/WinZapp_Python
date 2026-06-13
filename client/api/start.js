@@ -199,18 +199,11 @@ async function main() {
   }
 
   // ── Start PostgreSQL ───────────────────────────────────────────────────────
-  {
-    let startErr = null;
-    try {
-      await pg.start();
-    } catch (err) {
-      startErr = err;
-      console.error(`[WinZapp] Falha ao iniciar PostgreSQL: ${err.message}`);
-    }
-    if (startErr) {
-      console.error('[WinZapp] Failed to start embedded PostgreSQL:', startErr.message);
-      process.exit(1);
-    }
+  try {
+    await pg.start();
+  } catch (err) {
+    console.error('[WinZapp] Failed to start embedded PostgreSQL:', (err && err.message) || err);
+    process.exit(1);
   }
 
   // ── Ensure the application database exists with UTF-8 encoding ────────────
