@@ -559,6 +559,7 @@ class ConversationsPanel(wx.Panel):
         self.conversation_name = (
             self.main_window._resolve_contact_name(conversation)
             or self.main_window.find_name_through_messages(conversation)
+            or conversation.get("name", "")
             or conversation.get("pushName", "")
             or self.main_window.find_jid_through_messages(conversation)
             or (format_number(_conv_jid) if not _conv_jid.endswith("@lid") else "")
@@ -632,6 +633,7 @@ class ConversationsPanel(wx.Panel):
             name = (
                 mw._resolve_contact_name(chat)
                 or mw.find_name_through_messages(chat)
+                or chat.get("name", "")
                 or chat.get("pushName", "")
                 or mw.find_jid_through_messages(chat)
                 or format_number(jid)
@@ -826,15 +828,31 @@ class ConversationsPanel(wx.Panel):
             return  # already registered
         records.append(virtual_msg)
 
-    def _mark_message_sent(self, local_id: str):
+    def _mark_message_sent(self, local_id: str, real_id: str = None):
         """
         Called on the main thread when a queued message is successfully delivered.
         Clears the _local_pending flag, refreshes the list item, plays the
         message-sent sound, and refreshes the conversation list preview.
+        real_id (the WhatsApp message ID returned by the API) replaces the local
+        UUID in the virtual message's key so that media playback can later look
+        up the message in the Evolution API database.
         """
         for i, msg in enumerate(self._sorted_messages):
             if msg.get("_local_id") == local_id:
                 msg["_local_pending"] = False
+                # Replace the local UUID with the real WhatsApp message ID so
+                # get_base64_from_media can find the message in the DB later.
+                if real_id and isinstance(real_id, str):
+                    msg.setdefault("key", {})["id"] = real_id
+                    # For audio messages, kick off background download now that
+                    # we have the real ID the Evolution API can look up.
+                    if msg.get("messageType") == "audioMessage":
+                        import threading as _threading
+                        _threading.Thread(
+                            target=self.main_window.sync_if_media,
+                            args=(msg,),
+                            daemon=True,
+                        ).start()
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 # Play sent sound — fires only when the originating conversation
                 # is still the active one (otherwise local_id is not found here).
@@ -2557,6 +2575,7 @@ class ConversationsPanel(wx.Panel):
         note = (
             mw._resolve_contact_name(conversation)
             or mw.find_name_through_messages(conversation)
+            or conversation.get("name", "")
             or conversation.get("pushName", "")
             or format_number(jid)
         )
@@ -2566,7 +2585,10 @@ class ConversationsPanel(wx.Panel):
         try:
             if jid.endswith("@g.us"):
                 data = mw.get_group_info(jid)
-                size = data.get("size", 0)
+                # "size" may be absent in some Evolution API builds; fall back to
+                # counting the participants list which is always present.
+                participants = data.get("participants", [])
+                size = data.get("size") or len(participants)
                 note = i18n.t("group_size").format(count=size)
         except Exception:
             pass

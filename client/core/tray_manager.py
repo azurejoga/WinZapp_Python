@@ -104,6 +104,7 @@ class TrayIcon(wx.adv.TaskBarIcon):
                 name = (
                     mw._resolve_contact_name(chat)
                     or mw.find_name_through_messages(chat)
+                    or chat.get("name", "")
                     or chat.get("pushName", "")
                     or mw.find_jid_through_messages(chat)
                     or jid.split("@")[0]

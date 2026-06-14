@@ -1506,6 +1506,7 @@ class MainWindow(wx.Frame):
             name = (
                 self._resolve_contact_name(chat)
                 or self.find_name_through_messages(chat)
+                or chat.get("name", "")
                 or chat.get("pushName", "")
                 or self.find_jid_through_messages(chat)
                 or (format_number(jid) if not jid.endswith("@lid") else "")
@@ -1617,7 +1618,13 @@ class MainWindow(wx.Frame):
         def _name_from_contact(c):
             # Evolution API v2 stores the contact name in Contact.pushName
             # (derived from Baileys contact.name ?? contact.verifiedName).
-            return c.get("pushName") or None
+            # When neither field is set, Evolution API falls back to
+            # contact.id.split('@')[0] — which for system/business JIDs like
+            # "0@s.whatsapp.net" produces "0".  Reject purely-numeric strings.
+            name = c.get("pushName")
+            if not name or not isinstance(name, str) or name.strip().isdigit():
+                return None
+            return name.strip() or None
 
         # 1. Direct lookup by chat's own remoteJid
         contact = self.contacts.get(remoteJid)
@@ -1759,10 +1766,23 @@ class MainWindow(wx.Frame):
             wx.CallAfter(self.set_chats)
             self.save_data(self.chats, self.contacts)
 
+    # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
+    # to download older media causes the Evolution API to enter a 5-second retry
+    # loop for every expired URL, which starves the API thread pool and eventually
+    # breaks sends.  Never request media older than this threshold.
+    _MEDIA_MAX_AGE_SECONDS = 75 * 24 * 3600  # 75 days — safely inside the 90-day TTL
+
     def sync_if_media(self, msg):
         """Download media for a single message during the background sync phase."""
         message_type = msg.get("messageType", "")
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
+
+        # Skip media whose CDN URL has likely expired.
+        import time as _time
+        ts = int(msg.get("messageTimestamp", 0) or 0)
+        if ts and (_time.time() - ts) > self._MEDIA_MAX_AGE_SECONDS:
+            return
+
         try:
             if message_type == "audioMessage":
                 self.handle_audio_message(msg)
@@ -1840,10 +1860,13 @@ class MainWindow(wx.Frame):
             except Exception:
                 pass
             self._wa_connected = True
-            return True
+            try:
+                return body.get("key", {}).get("id") or True
+            except Exception:
+                return True
         except Exception as exc:
             print(f"[send_text_message] exception: {exc}")
-            return False
+            return None
 
     def send_audio_message(self, remote_jid: str, wav_path: str, quoted=None) -> bool:
         """
@@ -1873,11 +1896,14 @@ class MainWindow(wx.Frame):
             response = requests.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code in (200, 201):
                 self._wa_connected = True
-                return True
+                try:
+                    return response.json().get("key", {}).get("id") or True
+                except Exception:
+                    return True
             self._check_wa_connection_closed(response)
-            return False
+            return None
         except Exception:
-            return False
+            return None
 
     def send_reaction(self, remote_jid: str, msg_key: dict, emoji: str) -> bool:
         """Send a reaction to a message via the Evolution API."""
@@ -1893,13 +1919,15 @@ class MainWindow(wx.Frame):
         except Exception:
             return False
 
-    def _on_message_sent(self, local_id: str, audio_path: str = None):
+    def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None):
         """
         Called on the main thread after a queued message is successfully sent.
         Updates the UI status label and cleans up any temporary audio file.
+        real_id is the WhatsApp message ID returned by the API; it replaces the
+        local UUID in the virtual message so playback can find the message in the DB.
         """
         if hasattr(self, "conversations_panel"):
-            self.conversations_panel._mark_message_sent(local_id)
+            self.conversations_panel._mark_message_sent(local_id, real_id=real_id)
         # Clean up temp WAV for voice messages (media attachments keep their file).
         if audio_path and os.path.isfile(audio_path):
             try:
@@ -1923,6 +1951,8 @@ class MainWindow(wx.Frame):
             return
 
         base64_audio = self.get_base64_from_media(msg)
+        if not base64_audio:
+            return
         audio_content = base64.b64decode(base64_audio)
         self.save_audio_locally(msg, audio_content)
 
@@ -2266,9 +2296,14 @@ class MainWindow(wx.Frame):
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=60)
-            return r.status_code in (200, 201)
+            if r.status_code in (200, 201):
+                try:
+                    return r.json().get("key", {}).get("id") or True
+                except Exception:
+                    return True
+            return None
         except Exception:
-            return False
+            return None
 
     def send_contact_attachment(self, remote_jid: str, contact_info: dict,
                                 quoted: dict = None) -> bool:
@@ -2290,9 +2325,14 @@ class MainWindow(wx.Frame):
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=15)
-            return r.status_code in (200, 201)
+            if r.status_code in (200, 201):
+                try:
+                    return r.json().get("key", {}).get("id") or True
+                except Exception:
+                    return True
+            return None
         except Exception:
-            return False
+            return None
 
     # ── Message edit / delete-for-everyone ────────────────────────────────────
 

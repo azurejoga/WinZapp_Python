@@ -107,31 +107,33 @@ class MessageQueue:
                     break
                 try:
                     if msg.audio_path:
-                        ok = self.main_window.send_audio_message(
+                        real_id = self.main_window.send_audio_message(
                             msg.jid, msg.audio_path, quoted=msg.quoted
                         )
                     elif msg.media_path:
-                        ok = self.main_window.send_media_attachment(
+                        real_id = self.main_window.send_media_attachment(
                             msg.jid, msg.media_path, msg.media_type, msg.caption,
                             quoted=msg.quoted,
                         )
                     elif msg.contact_info:
-                        ok = self.main_window.send_contact_attachment(
+                        real_id = self.main_window.send_contact_attachment(
                             msg.jid, msg.contact_info, quoted=msg.quoted
                         )
                     else:
-                        ok = self.main_window.send_text_message(
+                        real_id = self.main_window.send_text_message(
                             msg.jid, msg.text, quoted=msg.quoted
                         )
-                    if ok:
+                    if real_id:
                         msg.fail_count = 0
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
-                        # Notify the UI on the main thread.
+                        # Pass the real WhatsApp message ID so _mark_message_sent
+                        # can update the virtual message's key.id for playback.
                         wx.CallAfter(
                             self.main_window._on_message_sent,
                             msg.local_id,
                             msg.audio_path,
+                            real_id if isinstance(real_id, str) else None,
                         )
                     else:
                         msg.fail_count += 1

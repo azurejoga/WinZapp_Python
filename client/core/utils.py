@@ -55,11 +55,19 @@ def decrypt_json(encrypted_data, key):
     return data
 
 def is_phone_like(name: str) -> bool:
-    """Return True if name looks like a phone number rather than a display name."""
+    """Return True if name looks like a phone number rather than a display name.
+
+    Also rejects purely-numeric strings of any length (e.g. "0") — those are
+    Evolution API fallbacks from contact.id.split('@')[0] when no real name is
+    available, not actual display names.
+    """
     if not name:
         return False
-    digit_count = sum(1 for c in name if c.isdigit())
-    return digit_count >= 7 and digit_count >= len(name) * 0.7
+    stripped = name.strip()
+    if stripped.isdigit():
+        return True  # "0", "123", "5511999999999" — never a real name
+    digit_count = sum(1 for c in stripped if c.isdigit())
+    return digit_count >= 7 and digit_count >= len(stripped) * 0.7
 
 def format_number(string_number):
     #Removes any non-digit characters

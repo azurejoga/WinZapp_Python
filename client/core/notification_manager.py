@@ -15,12 +15,18 @@ Design decisions:
   - SetCurrentProcessExplicitAppUserModelID("WinZapp") (called in main.py)
     ensures that Windows displays "WinZapp" — not the exe filename — as the
     sender inside the notification.
+  - A single long-lived worker thread owns the Toaster object so that WinRT
+    COM objects are always created and used on the same thread, avoiding the
+    [WinError -2147417842] RPC_E_WRONG_THREAD error that occurs when the
+    toaster is created in one thread and show_toast() called in another.
 """
 
+import queue
 import sys
 import threading
 import uuid
 import wx
+from app_paths import _is_frozen
 from core.i18n import I18n
 from core.message_queue import PendingMessage
 
@@ -229,19 +235,38 @@ class NotificationManager:
         self.main_window = main_window
         self.i18n = I18n(main_window)
         self.i18n.get_language()
-        self._toaster  = None
-        self._lock     = threading.Lock()
-        self._setup()
-
-    def _setup(self):
-        # In dev mode (running from source) the "WinZapp" AUMID is not registered
-        # in the Windows Start Menu, so InteractableWindowsToaster fails silently.
-        # Use sys.executable as the app-id instead — Python is already registered.
-        app_id = self.APP_ID if getattr(sys, "frozen", False) else sys.executable
+        self._toaster      = None
         self._interactable = False
+        # Queue consumed by a single long-lived worker thread so that the
+        # WinRT/COM toaster object is always created and used in the same
+        # thread (avoids [WinError -2147417842] RPC_E_WRONG_THREAD).
+        self._queue  = queue.Queue()
+        self._thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self._thread.start()
+
+    # ── Worker thread (owns the toaster for its whole lifetime) ───────────────
+
+    def _worker_loop(self):
+        """Long-lived thread: creates the toaster once, then drains the queue."""
+        self._setup_toaster()
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            title, body, remote_jid = item
+            self._dispatch(title, body, remote_jid)
+
+    def _setup_toaster(self):
+        # Use the registered AUMID ("WinZapp") in compiled builds so that the
+        # Start-Menu shortcut's AppUserModelID matches and Windows shows the
+        # correct app name.  In dev mode (running from source) the AUMID is not
+        # registered, so fall back to sys.executable which Python has registered.
+        # _is_frozen() handles both PyInstaller (sys.frozen) and Nuitka
+        # (__compiled__ module global).
+        app_id = self.APP_ID if _is_frozen() else sys.executable
         try:
             from windows_toasts import InteractableWindowsToaster
-            self._toaster = InteractableWindowsToaster(app_id)
+            self._toaster      = InteractableWindowsToaster(app_id)
             self._interactable = True
         except Exception as e:
             print(f"[NotificationManager] InteractableWindowsToaster unavailable: {e}")
@@ -251,57 +276,57 @@ class NotificationManager:
             except Exception as e2:
                 print(f"[NotificationManager] Toast system unavailable: {e2}")
 
-    def send(self, title: str, body: str, remote_jid: str):
-        """Send a toast notification (non-blocking)."""
+    def _dispatch(self, title: str, body: str, remote_jid: str):
         if not self._toaster:
             return
-        threading.Thread(
-            target=self._send_worker,
-            args=(title, body, remote_jid),
-            daemon=True,
-        ).start()
-
-    def _send_worker(self, title: str, body: str, remote_jid: str):
         try:
             from windows_toasts import Toast, ToastInputTextBox, ToastAudio, ToastDuration
 
-            with self._lock:
-                self.i18n.get_language()
-                reply_hint = self.i18n.t("notif_reply_hint")
+            self.i18n.get_language()
+            reply_hint = self.i18n.t("notif_reply_hint")
 
-                toast          = Toast()
-                toast.tag      = self.TOAST_TAG
-                toast.group    = self.TOAST_GRP
-                toast.duration = ToastDuration.Short   # ~5 seconds on screen
-                toast.text_fields = [title, body]
-                toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
+            toast          = Toast()
+            toast.tag      = self.TOAST_TAG
+            toast.group    = self.TOAST_GRP
+            toast.duration = ToastDuration.Short   # ~5 seconds on screen
+            toast.text_fields = [title, body]
+            toast.audio    = ToastAudio(silent=True)  # suppress Windows sound
 
-                jid_snapshot = remote_jid
+            jid_snapshot = remote_jid
 
-                if self._interactable:
-                    toast.AddInput(ToastInputTextBox("reply_box", reply_hint, ""))
+            if self._interactable:
+                toast.AddInput(ToastInputTextBox("reply_box", reply_hint, ""))
 
-                    def on_activated(event):
-                        inputs     = getattr(event, "inputs", {}) or {}
-                        reply_text = (inputs.get("reply_box") or "").strip()
-                        if reply_text:
-                            wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
-                        else:
-                            wx.CallAfter(self._do_open, jid_snapshot)
-
-                    toast.on_activated = on_activated
-                else:
-                    def on_activated(event):
+                def on_activated(event):
+                    inputs     = getattr(event, "inputs", {}) or {}
+                    reply_text = (inputs.get("reply_box") or "").strip()
+                    if reply_text:
+                        wx.CallAfter(self._do_reply, jid_snapshot, reply_text)
+                    else:
                         wx.CallAfter(self._do_open, jid_snapshot)
 
-                    toast.on_activated = on_activated
-                self._toaster.show_toast(toast)
+                toast.on_activated = on_activated
+            else:
+                def on_activated(event):
+                    wx.CallAfter(self._do_open, jid_snapshot)
 
-            # Play custom OGG sound after releasing the lock
+                toast.on_activated = on_activated
+
+            self._toaster.show_toast(toast)
+
+            # Play custom OGG sound after the toast is sent
             wx.CallAfter(self._play_sound)
 
         except Exception as e:
             print(f"[NotificationManager] send_worker error: {e}")
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def send(self, title: str, body: str, remote_jid: str):
+        """Enqueue a toast notification (non-blocking)."""
+        self._queue.put((title, body, remote_jid))
+
+    # ── Callbacks (called on wx main thread via CallAfter) ────────────────────
 
     def _play_sound(self):
         if hasattr(self.main_window, "message_background_sound"):
