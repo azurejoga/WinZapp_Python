@@ -1,5 +1,57 @@
+import ctypes
 import wx
 from core.i18n import LANGUAGE_NAMES
+
+# Win32 modifier constants for RegisterHotKey
+_MOD_ALT     = 0x0001
+_MOD_CONTROL = 0x0002
+_MOD_SHIFT   = 0x0004
+_MOD_WIN     = 0x0008
+
+
+class _HotkeyCapture(wx.TextCtrl):
+    """
+    Read-only TextCtrl that captures the next key combination pressed while
+    focused and stores it as (vk, mod) for use with RegisterHotKey.
+
+    Leave the field empty (Delete or Backspace) to clear the hotkey.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent, style=wx.TE_READONLY | wx.TE_PROCESS_ENTER)
+        self._vk  = 0
+        self._mod = 0
+        self.Bind(wx.EVT_KEY_DOWN, self._on_key_down)
+        self.Bind(wx.EVT_SET_FOCUS, self._on_focus)
+
+    def _on_focus(self, event):
+        self.SelectAll()
+        event.Skip()
+
+    def _on_key_down(self, event):
+        vk = event.GetRawKeyCode()
+        if vk in (0, 0x10, 0x11, 0x12, 0x5B, 0x5C):
+            # Pure modifier keys — wait for a non-modifier
+            event.Skip()
+            return
+        if vk in (wx.WXK_DELETE, wx.WXK_BACK):
+            # Clear the hotkey
+            self._vk  = 0
+            self._mod = 0
+            self.SetValue("")
+            return
+        mod = 0
+        if event.ControlDown(): mod |= _MOD_CONTROL
+        if event.AltDown():     mod |= _MOD_ALT
+        if event.ShiftDown():   mod |= _MOD_SHIFT
+        # Require at least one modifier (otherwise any key would capture)
+        if not mod:
+            event.Skip()
+            return
+        self._vk  = vk
+        self._mod = mod
+        from main import _vk_mod_to_str
+        self.SetValue(_vk_mod_to_str(vk, mod))
 
 
 class SettingsDialog(wx.Dialog):
@@ -75,6 +127,14 @@ class SettingsDialog(wx.Dialog):
             self._general_page, label=i18n.t("updates_label")
         )
         gen_sizer.Add(self._updates_check, 0, wx.ALL, 8)
+
+        gen_sizer.Add(
+            wx.StaticText(self._general_page, label=i18n.t("global_hotkey_label")),
+            0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
+        )
+        self._hotkey_field = _HotkeyCapture(self._general_page)
+        self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))
+        gen_sizer.Add(self._hotkey_field, 0, wx.EXPAND | wx.ALL, 8)
 
         self._general_page.SetSizer(gen_sizer)
         self._notebook.AddPage(self._general_page, i18n.t("tab_general"))
@@ -186,6 +246,17 @@ class SettingsDialog(wx.Dialog):
 
         updates = self.main_window.settings.get("general", {}).get("updates_enabled", True)
         self._updates_check.SetValue(updates)
+
+        hk = self.main_window.settings.get("general", {}).get("global_hotkey")
+        if hk and isinstance(hk, dict) and hk.get("vk"):
+            from main import _vk_mod_to_str
+            self._hotkey_field.SetValue(_vk_mod_to_str(hk["vk"], hk.get("mod", 0)))
+            self._hotkey_field._vk  = hk["vk"]
+            self._hotkey_field._mod = hk.get("mod", 0)
+        else:
+            self._hotkey_field.SetValue("")
+            self._hotkey_field._vk  = 0
+            self._hotkey_field._mod = 0
 
         page_size = self.main_window.settings.get("user_interface", {}).get("messages_page_size", 200)
         self._messages_page_size_field.SetValue(str(page_size))
@@ -324,6 +395,9 @@ class SettingsDialog(wx.Dialog):
                         cp._audio_tempo_ctrl.tempo = cp._audio_tempo_map.get(new_speed, 0)
                 except Exception:
                     pass
+
+        # Global hotkey
+        self.main_window.set_global_hotkey(self._hotkey_field._vk, self._hotkey_field._mod)
 
         # Persist and propagate
         self.main_window.save_settings()

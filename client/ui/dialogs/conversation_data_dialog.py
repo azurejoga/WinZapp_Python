@@ -81,9 +81,8 @@ class ConversationDataDialog(wx.Dialog):
         panel = wx.Panel(self)
         outer = wx.BoxSizer(wx.VERTICAL)
 
-        # Back / Close button (at the top, as the user requested)
-        back_btn = wx.Button(panel, label=self._i18n.t("back_btn"))
-        back_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CANCEL))
+        # wx.ID_CANCEL makes Esc close the dialog via the standard wx mechanism.
+        back_btn = wx.Button(panel, wx.ID_CANCEL, label=self._i18n.t("back_btn"))
         outer.Add(back_btn, 0, wx.ALL, 8)
 
         if self._is_group:
@@ -173,13 +172,28 @@ class ConversationDataDialog(wx.Dialog):
         """Fill the personal-chat TextCtrl (called on main thread)."""
         if not self.IsShown():
             return
+        i18n  = self._i18n
         lines = []
         name  = data.get("name") or self._name
-        phone = format_number(self._jid)
 
-        lines.append(f"{self._i18n.t('conversations')}: {name}")
+        # Resolve phone number: @lid JIDs are opaque device IDs, not phone
+        # numbers — bridge them to the real phone JID via the reverse cache.
+        jid = self._jid
+        if jid.endswith("@lid"):
+            phone_jid = getattr(self._mw, "_lid_to_phone", {}).get(jid, "")
+            if phone_jid:
+                jid = phone_jid
+        phone = format_number(jid) if not jid.endswith("@lid") else ""
+
+        lines.append(f"{i18n.t('conversations')}: {name}")
         if phone:
-            lines.append(f"{self._i18n.t('phone_label')}: {phone}")
+            lines.append(f"{i18n.t('phone_label')}: {phone}")
+
+        # fetchProfile returns {status: <bio/about text>} — not last-seen.
+        # Display it as the contact's WhatsApp "About" text.
+        about = str(data.get("status") or "").strip()
+        if about:
+            lines.append(f"{i18n.t('about_label')}: {about}")
 
         self._info_ctrl.SetValue("\n".join(lines))
         self._info_ctrl.SetFocus()
@@ -217,9 +231,19 @@ class ConversationDataDialog(wx.Dialog):
                 continue
             p_jid   = p.get("id", "")
             p_phone = format_number(p_jid)
-            # Try to resolve a name from contacts
-            contact = self._mw.contacts.get(p_jid, {})
-            p_name  = contact.get("pushName") or p_phone
+            # Resolve name: prefer address-book 'name', fall back to 'pushName'.
+            # Also bridge @lid JIDs to phone-number JIDs via the reverse cache.
+            contact = self._mw.contacts.get(p_jid)
+            if not contact and p_jid.endswith("@lid"):
+                phone_jid = getattr(self._mw, "_lid_to_phone", {}).get(p_jid, "")
+                if phone_jid:
+                    contact  = self._mw.contacts.get(phone_jid)
+                    p_phone  = p_phone or format_number(phone_jid)
+            p_name = ""
+            if contact:
+                p_name = (contact.get("name") or contact.get("pushName") or "").strip()
+            if not p_name or p_name.isdigit():
+                p_name = p_phone
             is_admin = "admin" if p.get("admin") else ""
             if is_admin and my_jid and (p_jid == my_jid or p_jid.split("@")[0] == my_jid.split("@")[0]):
                 user_is_admin = True

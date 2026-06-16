@@ -38,6 +38,25 @@ from datetime import datetime
 _URL_RE = re.compile(r'https?://\S+|www\.\S+')
 
 
+def _fmt_last_seen(ts, i18n) -> str:
+    """Format a Unix timestamp as a localized last-seen string."""
+    if not ts:
+        return ""
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        dt       = _dt.fromtimestamp(int(ts))
+        now      = _dt.now()
+        time_str = dt.strftime("%H:%M")
+        if dt.date() == now.date():
+            return i18n.t("last_seen_today").format(time=time_str)
+        if dt.date() == (now - _td(days=1)).date():
+            return i18n.t("last_seen_yesterday").format(time=time_str)
+        date_str = dt.strftime(i18n.t("date_fmt"))
+        return i18n.t("last_seen_date").format(date=date_str, time=time_str)
+    except Exception:
+        return ""
+
+
 class ConversationsPanel(wx.Panel):
     def __init__(self, main_window, parent):
         super().__init__(parent)
@@ -438,15 +457,22 @@ class ConversationsPanel(wx.Panel):
     # ── Accelerators ────────────────────────────────────────────────────────
 
     def create_accelerator_table(self):
-        self.ID_CTRL_F = wx.NewIdRef()
-        self.ID_CTRL_N = wx.NewIdRef()
+        self.ID_CTRL_F              = wx.NewIdRef()
+        self.ID_CTRL_N              = wx.NewIdRef()
+        self.ID_DELETE_CONV         = wx.NewIdRef()
+        self.ID_ALT_SHIFT_C_LIST    = wx.NewIdRef()  # copy number from chat list
+        AS = wx.ACCEL_ALT | wx.ACCEL_SHIFT
         accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_CTRL, ord("F"), self.ID_CTRL_F),
-            (wx.ACCEL_CTRL, ord("N"), self.ID_CTRL_N),
+            (wx.ACCEL_CTRL,   ord("F"),        self.ID_CTRL_F),
+            (wx.ACCEL_CTRL,   ord("N"),        self.ID_CTRL_N),
+            (wx.ACCEL_NORMAL, wx.WXK_DELETE,   self.ID_DELETE_CONV),
+            (AS,              ord("C"),         self.ID_ALT_SHIFT_C_LIST),
         ])
         self.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self.on_ctrl_f,           id=self.ID_CTRL_F)
-        self.Bind(wx.EVT_MENU, self._on_new_conversation, id=self.ID_CTRL_N)
+        self.Bind(wx.EVT_MENU, self.on_ctrl_f,                    id=self.ID_CTRL_F)
+        self.Bind(wx.EVT_MENU, self._on_new_conversation,         id=self.ID_CTRL_N)
+        self.Bind(wx.EVT_MENU, self._on_accel_delete_conv,        id=self.ID_DELETE_CONV)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_number_list,   id=self.ID_ALT_SHIFT_C_LIST)
 
     def create_accel_conversation(self):
         # ── Navigation / recording ──────────────────────────────────────────
@@ -457,17 +483,20 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_SHIFT_D    = wx.NewIdRef()  # conv data / discard     (Ctrl+Shift+D)
         # ── Attachment / media ───────────────────────────────────────────────
         self.ID_CTRL_SHIFT_A    = wx.NewIdRef()  # add attachment          (Ctrl+Shift+A)
-        self.ID_CTRL_SHIFT_B    = wx.NewIdRef()  # mute / unmute           (Ctrl+Shift+B)
+        self.ID_CTRL_SHIFT_B    = wx.NewIdRef()  # block contact           (Ctrl+Shift+B)
         # ── Message-level ────────────────────────────────────────────────────
         self.ID_ALT_R           = wx.NewIdRef()  # reply                   (Alt+R)
         self.ID_ALT_SHIFT_D     = wx.NewIdRef()  # message data            (Alt+Shift+D)
         self.ID_CTRL_SHIFT_E    = wx.NewIdRef()  # forward                 (Ctrl+Shift+E)
-        self.ID_CTRL_SHIFT_P    = wx.NewIdRef()  # pause/resume OR delete  (Ctrl+Shift+P)
+        self.ID_CTRL_SHIFT_P    = wx.NewIdRef()  # pause/resume recording  (Ctrl+Shift+P)
+        self.ID_CTRL_SHIFT_R    = wx.NewIdRef()  # react to message        (Ctrl+Shift+R)
+        self.ID_DELETE_MSG      = wx.NewIdRef()  # delete focused message  (Delete)
         self.ID_CTRL_C          = wx.NewIdRef()  # copy message            (Ctrl+C)
         self.ID_ALT_C           = wx.NewIdRef()  # show text popup         (Alt+C)
         # ── Conversation-level ───────────────────────────────────────────────
         self.ID_CTRL_SHIFT_S    = wx.NewIdRef()  # save as / download      (Ctrl+Shift+S)
-        self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # mark as read            (Ctrl+Shift+M)
+        self.ID_CTRL_SHIFT_M    = wx.NewIdRef()  # toggle read / unread    (Ctrl+Shift+M)
+        self.ID_CTRL_SHIFT_L    = wx.NewIdRef()  # clear conversation      (Ctrl+Shift+L)
         # ── Search / unread jump ─────────────────────────────────────────────
         self.ID_CTRL_SHIFT_F    = wx.NewIdRef()  # open search panel       (Ctrl+Shift+F)
         self.ID_ALT_3           = wx.NewIdRef()  # jump to unread sep      (Alt+3)
@@ -476,55 +505,66 @@ class ConversationsPanel(wx.Panel):
         self.ID_CONV_ARCHIVE    = wx.NewIdRef()  # archive / unarchive     (Ctrl+Q)
         # ── Group actions ────────────────────────────────────────────────────
         self.ID_ALT_SHIFT_R     = wx.NewIdRef()  # reply privately         (Alt+Shift+R)
-        self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # goto quoted message     (Alt+Shift+C)
+        self.ID_ALT_SHIFT_C     = wx.NewIdRef()  # copy phone number       (Alt+Shift+C)
         self.ID_ALT_SHIFT_V     = wx.NewIdRef()  # converse with           (Alt+Shift+V)
+        self.ID_ALT_SHIFT_Q     = wx.NewIdRef()  # goto quoted message     (Alt+Shift+Q)
+        self.ID_ALT_SHIFT_S     = wx.NewIdRef()  # mute / unmute           (Alt+Shift+S)
 
-        CS = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
-        AS = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
+        CS  = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
+        AS  = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
         accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_CTRL,    ord("R"),        self.ID_CTRL_R),
-            (wx.ACCEL_ALT,     ord("2"),        self.ID_ALT_2),
-            (wx.ACCEL_NORMAL,  wx.WXK_ESCAPE,   self.ID_ESC),
-            (wx.ACCEL_CTRL,    ord("W"),         self.CTRL_W),
-            (CS,               ord("D"),         self.ID_CTRL_SHIFT_D),
-            (CS,               ord("A"),         self.ID_CTRL_SHIFT_A),
-            (CS,               ord("B"),         self.ID_CTRL_SHIFT_B),
-            (wx.ACCEL_ALT,     ord("R"),         self.ID_ALT_R),
-            (AS,               ord("D"),         self.ID_ALT_SHIFT_D),
-            (CS,               ord("E"),         self.ID_CTRL_SHIFT_E),
-            (CS,               ord("P"),         self.ID_CTRL_SHIFT_P),
-            (wx.ACCEL_CTRL,    ord("C"),         self.ID_CTRL_C),
-            (wx.ACCEL_ALT,     ord("C"),         self.ID_ALT_C),
-            (CS,               ord("S"),         self.ID_CTRL_SHIFT_S),
-            (CS,               ord("M"),         self.ID_CTRL_SHIFT_M),
-            (CS,               ord("F"),         self.ID_CTRL_SHIFT_F),
-            (wx.ACCEL_ALT,     ord("3"),         self.ID_ALT_3),
-            (AS,               ord("R"),         self.ID_ALT_SHIFT_R),
-            (AS,               ord("C"),         self.ID_ALT_SHIFT_C),
-            (AS,               ord("V"),         self.ID_ALT_SHIFT_V),
+            (wx.ACCEL_CTRL,    ord("R"),         self.ID_CTRL_R),
+            (wx.ACCEL_ALT,     ord("2"),         self.ID_ALT_2),
+            (wx.ACCEL_NORMAL,  wx.WXK_ESCAPE,    self.ID_ESC),
+            (wx.ACCEL_CTRL,    ord("W"),          self.CTRL_W),
+            (CS,               ord("D"),          self.ID_CTRL_SHIFT_D),
+            (CS,               ord("A"),          self.ID_CTRL_SHIFT_A),
+            (CS,               ord("B"),          self.ID_CTRL_SHIFT_B),
+            (wx.ACCEL_ALT,     ord("R"),          self.ID_ALT_R),
+            (AS,               ord("D"),          self.ID_ALT_SHIFT_D),
+            (CS,               ord("E"),          self.ID_CTRL_SHIFT_E),
+            (CS,               ord("P"),          self.ID_CTRL_SHIFT_P),
+            (CS,               ord("R"),          self.ID_CTRL_SHIFT_R),
+            (wx.ACCEL_NORMAL,  wx.WXK_DELETE,     self.ID_DELETE_MSG),
+            (wx.ACCEL_CTRL,    ord("C"),          self.ID_CTRL_C),
+            (wx.ACCEL_ALT,     ord("C"),          self.ID_ALT_C),
+            (CS,               ord("S"),          self.ID_CTRL_SHIFT_S),
+            (CS,               ord("M"),          self.ID_CTRL_SHIFT_M),
+            (CS,               ord("L"),          self.ID_CTRL_SHIFT_L),
+            (CS,               ord("F"),          self.ID_CTRL_SHIFT_F),
+            (wx.ACCEL_ALT,     ord("3"),          self.ID_ALT_3),
+            (AS,               ord("R"),          self.ID_ALT_SHIFT_R),
+            (AS,               ord("C"),          self.ID_ALT_SHIFT_C),
+            (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
+            (AS,               ord("Q"),          self.ID_ALT_SHIFT_Q),
+            (AS,               ord("S"),          self.ID_ALT_SHIFT_S),
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
-        self.Bind(wx.EVT_MENU, self.on_record_voice_message,   id=self.ID_CTRL_R)
-        self.Bind(wx.EVT_MENU, self._on_accel_jump_last,       id=self.ID_ALT_2)
-        self.Bind(wx.EVT_MENU, self.close_conversation,        id=self.ID_ESC)
-        self.Bind(wx.EVT_MENU, self.close_conversation,        id=self.CTRL_W)
-        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d,          id=self.ID_CTRL_SHIFT_D)
-        self.Bind(wx.EVT_MENU, self.on_add_attachment,         id=self.ID_CTRL_SHIFT_A)
-        self.Bind(wx.EVT_MENU, self._on_action_save_as,         id=self.ID_CTRL_SHIFT_S)   # save as (Ctrl+Shift+S)
-        self.Bind(wx.EVT_MENU, self._on_accel_reply,           id=self.ID_ALT_R)
-        self.Bind(wx.EVT_MENU, self._on_accel_message_data,    id=self.ID_ALT_SHIFT_D)
-        self.Bind(wx.EVT_MENU, self._on_accel_forward,         id=self.ID_CTRL_SHIFT_E)
-        # Ctrl+Shift+P: pause/resume when recording, delete message otherwise
-        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p,          id=self.ID_CTRL_SHIFT_P)
-        self.Bind(wx.EVT_MENU, self._on_accel_copy_message,    id=self.ID_CTRL_C)
-        self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup, id=self.ID_ALT_C)
-        self.Bind(wx.EVT_MENU, self._on_accel_mute,            id=self.ID_CTRL_SHIFT_B)   # mute (Ctrl+Shift+B)
-        self.Bind(wx.EVT_MENU, self._on_accel_mark_read,       id=self.ID_CTRL_SHIFT_M)
-        self.Bind(wx.EVT_MENU, self._on_accel_open_search,     id=self.ID_CTRL_SHIFT_F)
-        self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,     id=self.ID_ALT_3)
-        self.Bind(wx.EVT_MENU, self._on_accel_reply_private,   id=self.ID_ALT_SHIFT_R)
-        self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_c,     id=self.ID_ALT_SHIFT_C)
-        self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,     id=self.ID_ALT_SHIFT_V)
+        self.Bind(wx.EVT_MENU, self.on_record_voice_message,       id=self.ID_CTRL_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_jump_last,           id=self.ID_ALT_2)
+        self.Bind(wx.EVT_MENU, self.close_conversation,            id=self.ID_ESC)
+        self.Bind(wx.EVT_MENU, self.close_conversation,            id=self.CTRL_W)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_d,              id=self.ID_CTRL_SHIFT_D)
+        self.Bind(wx.EVT_MENU, self.on_add_attachment,             id=self.ID_CTRL_SHIFT_A)
+        self.Bind(wx.EVT_MENU, self._on_action_save_as,            id=self.ID_CTRL_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_accel_reply,               id=self.ID_ALT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_message_data,        id=self.ID_ALT_SHIFT_D)
+        self.Bind(wx.EVT_MENU, self._on_accel_forward,             id=self.ID_CTRL_SHIFT_E)
+        self.Bind(wx.EVT_MENU, self._on_ctrl_shift_p,              id=self.ID_CTRL_SHIFT_P)
+        self.Bind(wx.EVT_MENU, self._on_accel_react,               id=self.ID_CTRL_SHIFT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_delete_message,      id=self.ID_DELETE_MSG)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_message,        id=self.ID_CTRL_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_show_text_popup,     id=self.ID_ALT_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_block,               id=self.ID_CTRL_SHIFT_B)
+        self.Bind(wx.EVT_MENU, self._on_accel_toggle_read,         id=self.ID_CTRL_SHIFT_M)
+        self.Bind(wx.EVT_MENU, self._on_accel_clear,               id=self.ID_CTRL_SHIFT_L)
+        self.Bind(wx.EVT_MENU, self._on_accel_open_search,         id=self.ID_CTRL_SHIFT_F)
+        self.Bind(wx.EVT_MENU, self._on_accel_jump_unread,         id=self.ID_ALT_3)
+        self.Bind(wx.EVT_MENU, self._on_accel_reply_private,       id=self.ID_ALT_SHIFT_R)
+        self.Bind(wx.EVT_MENU, self._on_accel_copy_number_speak,   id=self.ID_ALT_SHIFT_C)
+        self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
+        self.Bind(wx.EVT_MENU, self._on_accel_goto_quoted,         id=self.ID_ALT_SHIFT_Q)
+        self.Bind(wx.EVT_MENU, self._on_accel_mute,                id=self.ID_ALT_SHIFT_S)
 
     # ── Conversations list events ───────────────────────────────────────────
 
@@ -871,6 +911,14 @@ class ConversationsPanel(wx.Panel):
                 self.messages_list.SetItemText(i, self._render_message_line(msg))
                 break
 
+    def refresh_message_status(self, msg_id: str, status: str):
+        """Update the status icon for a single sent message without full redraw."""
+        for i, msg in enumerate(self._sorted_messages):
+            if msg.get("key", {}).get("id") == msg_id:
+                msg.setdefault("MessageUpdate", []).append({"status": status})
+                self.messages_list.SetItemText(i, self._render_message_line(msg))
+                break
+
     # ── Voice recording ──────────────────────────────────────────────────────
 
     def _start_voice_recording(self):
@@ -1106,6 +1154,7 @@ class ConversationsPanel(wx.Panel):
             return
         jid      = chat.get("remoteJid", "")
         is_group = jid.endswith("@g.us")
+        is_self  = self.main_window._is_self_jid(jid)
         mw       = self.main_window
         i18n     = mw.i18n
 
@@ -1128,14 +1177,14 @@ class ConversationsPanel(wx.Panel):
             read_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_read')}\tCtrl+Shift+M")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_mark_read(j), read_item)
         else:
-            unread_item = menu.Append(wx.ID_ANY, i18n.t("mark_as_unread"))
+            unread_item = menu.Append(wx.ID_ANY, f"{i18n.t('mark_as_unread')}\tCtrl+Shift+M")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_mark_unread(j), unread_item)
 
         menu.AppendSeparator()
 
         # ── Mute ──────────────────────────────────────────────────────────
         if mw.is_chat_muted(jid):
-            unmute_item = menu.Append(wx.ID_ANY, f"{i18n.t('unmute_chat')}\tCtrl+Shift+S")
+            unmute_item = menu.Append(wx.ID_ANY, f"{i18n.t('unmute_chat')}\tAlt+Shift+S")
             self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_unmute(j), unmute_item)
         else:
             mute_sub = wx.Menu()
@@ -1149,17 +1198,18 @@ class ConversationsPanel(wx.Panel):
                     lambda e, j=jid, s=secs: self._on_menu_mute(j, s),
                     item,
                 )
-            menu.AppendSubMenu(mute_sub, f"{i18n.t('mute_chat')}\tCtrl+Shift+S")
+            menu.AppendSubMenu(mute_sub, f"{i18n.t('mute_chat')}\tAlt+Shift+S")
 
         if not is_group:
             menu.AppendSeparator()
-            block_item = menu.Append(wx.ID_ANY, i18n.t("block_contact"))
-            self.Bind(
-                wx.EVT_MENU,
-                lambda e, c=chat, j=jid: self._on_menu_block(c, j),
-                block_item,
-            )
-            copy_num_item = menu.Append(wx.ID_ANY, i18n.t("copy_number"))
+            if not is_self:
+                block_item = menu.Append(wx.ID_ANY, f"{i18n.t('block_contact')}\tCtrl+Shift+B")
+                self.Bind(
+                    wx.EVT_MENU,
+                    lambda e, c=chat, j=jid: self._on_menu_block(c, j),
+                    block_item,
+                )
+            copy_num_item = menu.Append(wx.ID_ANY, f"{i18n.t('copy_number')}\tAlt+Shift+C")
             self.Bind(
                 wx.EVT_MENU,
                 lambda e, j=jid: self._on_menu_copy_number(j),
@@ -1187,10 +1237,10 @@ class ConversationsPanel(wx.Panel):
         menu.AppendSeparator()
 
         # ── Clear / Delete / Leave ────────────────────────────────────────
-        clear_item = menu.Append(wx.ID_ANY, i18n.t("clear_chat"))
+        clear_item = menu.Append(wx.ID_ANY, f"{i18n.t('clear_chat')}\tCtrl+Shift+L")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_clear_chat(j), clear_item)
 
-        delete_item = menu.Append(wx.ID_ANY, i18n.t("delete_chat"))
+        delete_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_chat')}\tDelete")
         self.Bind(wx.EVT_MENU, lambda e, j=jid: self._on_menu_delete_chat(j), delete_item)
 
         if is_group:
@@ -1364,7 +1414,7 @@ class ConversationsPanel(wx.Panel):
         if ctx_reply:
             goto_item = menu.Append(
                 wx.ID_ANY,
-                f"{i18n.t('goto_quoted')}\tAlt+Shift+C",
+                f"{i18n.t('goto_quoted')}\tAlt+Shift+Q",
             )
             self.Bind(
                 wx.EVT_MENU,
@@ -1450,8 +1500,8 @@ class ConversationsPanel(wx.Panel):
                     converse_item,
                 )
 
-        # React (opens emoji picker)
-        react_item = menu.Append(wx.ID_ANY, i18n.t("react_to_message"))
+        # React (opens emoji picker) — Ctrl+Shift+R
+        react_item = menu.Append(wx.ID_ANY, f"{i18n.t('react_to_message')}\tCtrl+Shift+R")
         self.Bind(
             wx.EVT_MENU,
             lambda e, m=msg: self._on_menu_react(m),
@@ -1509,8 +1559,8 @@ class ConversationsPanel(wx.Panel):
 
         menu.AppendSeparator()
 
-        # Delete message (with scope dialog — Ctrl+Shift+P)
-        del_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_message')}\tCtrl+Shift+P")
+        # Delete message — Delete key
+        del_item = menu.Append(wx.ID_ANY, f"{i18n.t('delete_message')}\tDelete")
         self.Bind(
             wx.EVT_MENU,
             lambda e, i=index: self._on_menu_delete_message(i),
@@ -2383,25 +2433,36 @@ class ConversationsPanel(wx.Panel):
         mw = self.main_window
         lid_to_phone = getattr(mw, "_lid_to_phone", {})
 
+        def _strip_device(j: str) -> str:
+            """Remove Baileys device suffix (':N') from a JID, e.g.
+            '5511:5@s.whatsapp.net' → '5511@s.whatsapp.net'."""
+            if ":" in j and "@" in j:
+                local, domain = j.rsplit("@", 1)
+                return f"{local.split(':')[0]}@{domain}"
+            return j
+
         def _contact_name(lj: str) -> str:
             """Return saved contact name for lj, trying @lid ↔ phone both ways,
-            then the chat's own 'name' field as a fallback."""
-            candidates = [lj]
-            if lj.endswith("@lid"):
-                phone = lid_to_phone.get(lj, "")
+            stripping Baileys device suffixes, then the chat 'name' as fallback."""
+            lj_clean   = _strip_device(lj)
+            candidates = [lj_clean]
+            if lj_clean != lj:
+                candidates.append(lj)  # also try original
+            if lj_clean.endswith("@lid"):
+                phone = lid_to_phone.get(lj_clean, "")
                 if phone:
                     candidates.append(phone)
-            elif lj.endswith("@s.whatsapp.net"):
-                for lid, ph in lid_to_phone.items():
-                    if ph == lj:
-                        candidates.append(lid)
-                        break
+            elif lj_clean.endswith("@s.whatsapp.net"):
+                # O(1) reverse lookup instead of scanning the entire lid_to_phone dict
+                lid = getattr(mw, "_phone_to_lid", {}).get(lj_clean, "")
+                if lid:
+                    candidates.append(lid)
 
             for cjid in candidates:
                 c = mw.contacts.get(cjid)
                 if c:
-                    n = c.get("pushName") or ""
-                    n = n.strip()
+                    # Prefer address-book name ('name') over WhatsApp profile name ('pushName')
+                    n = (c.get("name") or c.get("pushName") or "").strip()
                     if n and not n.isdigit() and not is_phone_like(n):
                         return n
                 # Also check the direct-chat object's 'name' field — Baileys
@@ -2482,29 +2543,64 @@ class ConversationsPanel(wx.Panel):
             sub = msg_obj.get(sub_key)
             if isinstance(sub, dict):
                 ctx = sub.get("contextInfo")
-                if isinstance(ctx, dict) and "quotedMessage" in ctx:
+                if isinstance(ctx, dict) and ("quotedMessage" in ctx or ctx.get("stanzaId")):
                     return ctx
         return None
 
     def _get_quoted_sender(self, ctx: dict) -> str:
         """Resolve the display name of the quoted message sender from contextInfo."""
+        mw   = self.main_window
+        i18n = mw.i18n
+
+        def _strip_dev(j: str) -> str:
+            if ":" in j and "@" in j:
+                local, domain = j.rsplit("@", 1)
+                return f"{local.split(':')[0]}@{domain}"
+            return j
+
         participant = ctx.get("participant", "")
+
         if not participant:
+            # 1:1 chat: Baileys leaves participant empty; resolve by stanzaId lookup.
+            stanza_id = ctx.get("stanzaId", "")
+            if stanza_id:
+                for m in self._sorted_messages:
+                    if m.get("key", {}).get("id") == stanza_id:
+                        if m.get("key", {}).get("fromMe", False):
+                            return i18n.t("sender_you")
+                        # Not fromMe → the other party in the conversation
+                        conv = self.conversation or {}
+                        remote = conv.get("remoteJid", "")
+                        return (
+                            mw._resolve_contact_name(conv)
+                            or mw.find_name_through_messages(conv)
+                            or conv.get("name", "")
+                            or conv.get("pushName", "")
+                            or (format_number(remote) if remote and not remote.endswith(("@g.us", "@lid")) else "")
+                        )
             return ""
-        mw = self.main_window
-        contact = mw.contacts.get(participant)
-        if not contact and participant.endswith("@lid"):
-            phone_jid = getattr(mw, "_lid_to_phone", {}).get(participant, "")
-            if phone_jid:
-                contact = mw.contacts.get(phone_jid)
+
+        # Strip Baileys device suffix before contact lookup
+        clean_p = _strip_dev(participant)
+
+        # Bridge @lid → phone
+        if clean_p.endswith("@lid"):
+            clean_p = getattr(mw, "_lid_to_phone", {}).get(clean_p, clean_p)
+
+        # Check if the quoted sender is "me"
+        my_jid = getattr(mw, "my_jid", "")
+        if my_jid and clean_p.split("@")[0] == my_jid.split("@")[0]:
+            return i18n.t("sender_you")
+
+        contact = mw.contacts.get(clean_p) or mw.contacts.get(participant)
         if contact:
-            name = contact.get("pushName") or ""
+            name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):
                 return name
-        if participant.endswith("@lid"):
-            phone_jid = getattr(mw, "_lid_to_phone", {}).get(participant, "")
-            return format_number(phone_jid) if phone_jid else ""
-        return format_number(participant) or participant
+
+        if clean_p.endswith("@lid"):
+            return ""
+        return format_number(clean_p) or clean_p
 
     def _render_message_line(self, msg) -> str:
         """Produce the full display string for a single message row."""
@@ -2576,11 +2672,9 @@ class ConversationsPanel(wx.Panel):
             self._show_conversation_data()
 
     def _on_ctrl_shift_p(self, event):
-        """Pause/resume recording when active; delete focused message otherwise."""
+        """Pause/resume recording when active (no-op otherwise)."""
         if self._is_recording:
             self._toggle_pause_recording(event)
-        else:
-            self._on_accel_delete_message(event)
 
     # ── Conversation / group data ────────────────────────────────────────────
 
@@ -2610,8 +2704,6 @@ class ConversationsPanel(wx.Panel):
             or format_number(jid)
         )
 
-        # Evolution API v2's fetchProfile exposes no presence/last-seen data,
-        # so for private chats the note stays as the resolved contact name.
         try:
             if jid.endswith("@g.us"):
                 data = mw.get_group_info(jid)
@@ -2620,6 +2712,17 @@ class ConversationsPanel(wx.Panel):
                 participants = data.get("participants", [])
                 size = data.get("size") or len(participants)
                 note = i18n.t("group_size").format(count=size)
+            else:
+                # Private chat: fetch last-seen / online status from the API.
+                data      = mw.get_contact_profile(jid)
+                is_online = data.get("online", False)
+                last_seen = data.get("lastSeen")
+                if is_online:
+                    note = i18n.t("online_status")
+                elif last_seen:
+                    ls_str = _fmt_last_seen(last_seen, i18n)
+                    if ls_str:
+                        note = ls_str
         except Exception:
             pass
 
@@ -3165,25 +3268,53 @@ class ConversationsPanel(wx.Panel):
         if index >= 0:
             self._on_menu_delete_message(index)
 
-    def _on_accel_mute(self, event):
+    def _on_accel_block(self, event):
+        """Ctrl+Shift+B: block/unblock the current contact."""
+        if self.conversation is None:
+            return
+        jid = self.conversation.get("remoteJid", "")
+        if not jid or jid.endswith("@g.us"):
+            return
+        if self.main_window._is_self_jid(jid):
+            return  # cannot block yourself
+        self._on_menu_block(self.conversation, jid)
+
+    def _on_accel_toggle_read(self, event):
+        """Ctrl+Shift+M: mark conversation as read if it has unreads, else unread."""
         if self.conversation is None:
             return
         jid = self.conversation.get("remoteJid", "")
         if not jid:
             return
-        mw = self.main_window
-        if mw.is_chat_muted(jid):
-            mw.unmute_chat(jid)
+        if int(self.conversation.get("unreadCount") or 0) > 0:
+            self.main_window.mark_conversation_as_read(jid)
         else:
-            # Default: mute for 8 hours
-            mw.mute_chat(jid, 8 * 3600)
+            self.main_window.mark_conversation_as_unread(jid)
 
-    def _on_accel_mark_read(self, event):
+    def _on_accel_clear(self, event):
+        """Ctrl+Shift+L: clear all local messages from the current conversation."""
         if self.conversation is None:
             return
         jid = self.conversation.get("remoteJid", "")
         if jid:
-            self.main_window.mark_conversation_as_read(jid)
+            self._on_menu_clear_chat(jid)
+
+    def _on_accel_react(self, event):
+        """Ctrl+Shift+R: open the reaction picker for the focused message."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if not self._is_separator(msg):
+            self._on_menu_react(msg)
+
+    def _on_accel_delete_conv(self, event):
+        """Delete (in chat list): delete the focused conversation."""
+        selected = self.conversations_list.GetFirstSelected()
+        if 0 <= selected < len(self.chats_list):
+            jid = self.chats_list[selected].get("remoteJid", "")
+            if jid:
+                self._on_menu_delete_chat(jid)
 
     def _on_accel_copy_message(self, event):
         """Ctrl+C: copy focused message text to clipboard."""
@@ -3226,19 +3357,36 @@ class ConversationsPanel(wx.Panel):
         if participant_jid:
             self._on_menu_reply_private(msg, participant_jid)
 
-    # ── Alt+Shift+C: goto quoted message ────────────────────────────────────
+    # ── Alt+Shift+C: copy phone number + speak ──────────────────────────────
 
-    def _on_accel_alt_shift_c(self, event):
-        """Alt+Shift+C: go to the quoted message for the focused reply."""
-        index = self.messages_list.GetFirstSelected()
-        if index < 0 or index >= len(self._sorted_messages):
+    def _copy_and_speak_jid(self, jid: str):
+        """Internal: copy formatted phone number for jid to clipboard and speak it."""
+        if not jid or jid.endswith("@g.us"):
             return
-        msg = self._sorted_messages[index]
-        if self._is_separator(msg):
+        number = format_number(jid)
+        if not number:
             return
-        ctx = self._get_context_info(msg)
-        if ctx:
-            self._on_menu_goto_quoted(msg, ctx)
+        try:
+            pyperclip.copy(number)
+        except Exception:
+            pass
+        self.main_window.speak_output.output(number)
+
+    def _on_accel_copy_number_speak(self, event):
+        """Alt+Shift+C (conversation panel): copy current conversation's phone number."""
+        if self.conversation is None:
+            return
+        self._copy_and_speak_jid(self.conversation.get("remoteJid", ""))
+
+    def _on_accel_copy_number_list(self, event):
+        """Alt+Shift+C (chat list): copy selected conversation's phone number."""
+        idx = self.conversations_list.GetFirstSelected()
+        if idx < 0 or idx >= len(self.chats_list):
+            # Fall back to the currently open conversation if nothing selected
+            if self.conversation:
+                self._copy_and_speak_jid(self.conversation.get("remoteJid", ""))
+            return
+        self._copy_and_speak_jid(self.chats_list[idx].get("remoteJid", ""))
 
     # ── Alt+Shift+V: converse with participant ───────────────────────────────
 
@@ -3260,6 +3408,35 @@ class ConversationsPanel(wx.Panel):
             if participant_jid:
                 pname = self._get_participant_name(participant_jid, msg)
                 self._on_menu_converse_private(participant_jid, pname)
+
+    # ── Alt+Shift+Q: goto quoted message ────────────────────────────────────────
+
+    def _on_accel_goto_quoted(self, event):
+        """Alt+Shift+Q: navigate to the quoted message of the focused message."""
+        index = self.messages_list.GetFirstSelected()
+        if index < 0 or index >= len(self._sorted_messages):
+            return
+        msg = self._sorted_messages[index]
+        if self._is_separator(msg):
+            return
+        ctx = self._get_context_info(msg)
+        if ctx:
+            self._on_menu_goto_quoted(msg, ctx)
+
+    # ── Alt+Shift+S: mute / unmute conversation ──────────────────────────────
+
+    def _on_accel_mute(self, event):
+        """Alt+Shift+S: mute for 8 hours if not muted, otherwise unmute."""
+        if self.conversation is None:
+            return
+        jid = self.conversation.get("remoteJid", "")
+        if not jid:
+            return
+        mw = self.main_window
+        if mw.is_chat_muted(jid):
+            self._on_menu_unmute(jid)
+        else:
+            self._on_menu_mute(jid, 28800)  # 8 hours default
 
     # ── Ctrl+N: nova conversa ─────────────────────────────────────────────────
 

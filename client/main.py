@@ -10,6 +10,7 @@ import base64
 import socketio
 import atexit
 import ctypes
+import ctypes.wintypes
 from accessible_output2 import outputs
 from core.sound_system import SoundSystem, Sound
 from core.i18n import I18n
@@ -33,6 +34,259 @@ try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("WinZapp")
 except Exception:
     pass
+
+
+def _is_elevated() -> bool:
+    """Return True when the current process holds an elevated (admin) token."""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+class _Win32Proc:
+    """Minimal Popen-compatible wrapper around a Win32 process handle returned by
+    CreateProcessWithTokenW (used when de-elevating the Node.js child process)."""
+
+    __slots__ = ("_h", "pid")
+
+    def __init__(self, h_process, pid: int):
+        self._h  = h_process
+        self.pid = pid
+
+    def poll(self):
+        ec = ctypes.wintypes.DWORD(0)
+        ctypes.windll.kernel32.GetExitCodeProcess(self._h, ctypes.byref(ec))
+        return None if ec.value == 259 else int(ec.value)  # 259 = STILL_ACTIVE
+
+    def terminate(self):
+        try:
+            ctypes.windll.kernel32.TerminateProcess(self._h, 1)
+        except Exception:
+            pass
+        finally:
+            try:
+                ctypes.windll.kernel32.CloseHandle(self._h)
+            except Exception:
+                pass
+
+
+class _HotkeyManager:
+    """
+    Registers a Windows global hotkey (RegisterHotKey) and calls a callback
+    on the wx main thread when the hotkey is pressed from any application.
+
+    A background thread owns the Win32 message loop (GetMessageW) so WM_HOTKEY
+    is received even when WinZapp is minimised or in the background.
+    """
+
+    _WM_HOTKEY = 0x0312
+    _HOTKEY_ID = 1
+
+    def __init__(self, vk: int, mod: int, callback):
+        self._vk       = vk
+        self._mod      = mod
+        self._callback = callback
+        self._stop     = threading.Event()
+        self._thread   = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        user32   = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        class _POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.wintypes.LONG), ("y", ctypes.wintypes.LONG)]
+
+        class _MSG(ctypes.Structure):
+            _fields_ = [
+                ("hwnd",    ctypes.wintypes.HWND),
+                ("message", ctypes.wintypes.UINT),
+                ("wParam",  ctypes.wintypes.WPARAM),
+                ("lParam",  ctypes.wintypes.LPARAM),
+                ("time",    ctypes.wintypes.DWORD),
+                ("pt",      _POINT),
+            ]
+
+        if not user32.RegisterHotKey(None, self._HOTKEY_ID, self._mod, self._vk):
+            print(f"[HotkeyManager] RegisterHotKey failed: {kernel32.GetLastError()}")
+            return
+
+        msg = _MSG()
+        while not self._stop.is_set():
+            # MsgWaitForMultipleObjects with a 200 ms timeout so we can check _stop.
+            result = ctypes.windll.user32.MsgWaitForMultipleObjects(
+                0, None, False, 200, 0x0004  # QS_POSTMESSAGE
+            )
+            if self._stop.is_set():
+                break
+            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
+                if msg.message == self._WM_HOTKEY:
+                    wx.CallAfter(self._callback)
+
+        user32.UnregisterHotKey(None, self._HOTKEY_ID)
+
+    def stop(self):
+        self._stop.set()
+
+
+def _vk_mod_to_str(vk: int, mod: int) -> str:
+    """Convert a (vk, mod) pair to a human-readable string like 'Ctrl+Shift+A'."""
+    parts = []
+    if mod & 0x0002: parts.append("Ctrl")   # MOD_CONTROL
+    if mod & 0x0001: parts.append("Alt")    # MOD_ALT
+    if mod & 0x0004: parts.append("Shift")  # MOD_SHIFT
+    if mod & 0x0008: parts.append("Win")    # MOD_WIN
+    vk_names = {
+        0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x1B: "Esc",
+        0x20: "Space", 0x21: "PgUp", 0x22: "PgDn", 0x23: "End",
+        0x24: "Home", 0x25: "Left", 0x26: "Up", 0x27: "Right",
+        0x28: "Down", 0x2D: "Ins", 0x2E: "Del", 0x70: "F1",
+        0x71: "F2", 0x72: "F3", 0x73: "F4", 0x74: "F5", 0x75: "F6",
+        0x76: "F7", 0x77: "F8", 0x78: "F9", 0x79: "F10",
+        0x7A: "F11", 0x7B: "F12",
+    }
+    if vk in vk_names:
+        parts.append(vk_names[vk])
+    elif 0x30 <= vk <= 0x39:
+        parts.append(chr(vk))
+    elif 0x41 <= vk <= 0x5A:
+        parts.append(chr(vk))
+    else:
+        parts.append(f"#{vk:02X}")
+    return "+".join(parts)
+
+
+def _spawn_delevated(cmd: list, cwd: str, log_fh, main_window) -> bool:
+    """
+    Launch *cmd* as a restricted (non-admin) process using the Windows Safer API.
+
+    SaferCreateLevel(SAFER_LEVELID_NORMALUSER) produces a token where the
+    Administrators SID is marked DENY_ONLY, so PostgreSQL's pgwin32_is_admin()
+    / CheckTokenMembership() returns FALSE even when the parent holds an
+    elevated token, allowing initdb to proceed.
+
+    Returns True and sets main_window.evolution_process on success.
+    Returns False when de-elevation is impossible or the API call fails.
+    """
+    import msvcrt
+
+    SAFER_SCOPEID_USER        = 1
+    SAFER_LEVELID_NORMALUSER  = 0x20000
+    SAFER_LEVEL_OPEN          = 1
+    SAFER_TOKEN_NULL_IF_EQUAL = 4
+    LOGON_WITH_PROFILE        = 0x00000001
+    CREATE_NO_WINDOW          = 0x08000000
+    STARTF_USESHOWWINDOW      = 0x00000001
+    STARTF_USESTDHANDLES      = 0x00000100
+    SW_HIDE                   = 0
+    DUPLICATE_SAME_ACCESS     = 0x00000002
+
+    kernel32 = ctypes.windll.kernel32
+    advapi32 = ctypes.windll.advapi32
+
+    class _STARTUPINFOW(ctypes.Structure):
+        _fields_ = [
+            ("cb",              ctypes.wintypes.DWORD),
+            ("lpReserved",      ctypes.wintypes.LPWSTR),
+            ("lpDesktop",       ctypes.wintypes.LPWSTR),
+            ("lpTitle",         ctypes.wintypes.LPWSTR),
+            ("dwX",             ctypes.wintypes.DWORD),
+            ("dwY",             ctypes.wintypes.DWORD),
+            ("dwXSize",         ctypes.wintypes.DWORD),
+            ("dwYSize",         ctypes.wintypes.DWORD),
+            ("dwXCountChars",   ctypes.wintypes.DWORD),
+            ("dwYCountChars",   ctypes.wintypes.DWORD),
+            ("dwFillAttribute", ctypes.wintypes.DWORD),
+            ("dwFlags",         ctypes.wintypes.DWORD),
+            ("wShowWindow",     ctypes.wintypes.WORD),
+            ("cbReserved2",     ctypes.wintypes.WORD),
+            ("lpReserved2",     ctypes.POINTER(ctypes.c_byte)),
+            ("hStdInput",       ctypes.wintypes.HANDLE),
+            ("hStdOutput",      ctypes.wintypes.HANDLE),
+            ("hStdError",       ctypes.wintypes.HANDLE),
+        ]
+
+    class _PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("hProcess",    ctypes.wintypes.HANDLE),
+            ("hThread",     ctypes.wintypes.HANDLE),
+            ("dwProcessId", ctypes.wintypes.DWORD),
+            ("dwThreadId",  ctypes.wintypes.DWORD),
+        ]
+
+    try:
+        # ── Step 1: create a SAFER level for a normal (non-admin) user ───────
+        h_level = ctypes.wintypes.HANDLE(0)
+        if not advapi32.SaferCreateLevel(
+            SAFER_SCOPEID_USER,
+            SAFER_LEVELID_NORMALUSER,
+            SAFER_LEVEL_OPEN,
+            ctypes.byref(h_level),
+            None,
+        ):
+            print(f"[_spawn_delevated] SaferCreateLevel failed: {kernel32.GetLastError()}")
+            return False
+
+        # ── Step 2: compute a restricted token from the current process token ─
+        # NULL input token = use the calling thread's primary token (elevated).
+        # The result has the Administrators SID as DENY_ONLY so
+        # CheckTokenMembership(adminSID) returns FALSE inside node/PostgreSQL.
+        h_restricted = ctypes.wintypes.HANDLE(0)
+        ok = advapi32.SaferComputeTokenFromLevel(
+            h_level, None, ctypes.byref(h_restricted),
+            SAFER_TOKEN_NULL_IF_EQUAL, None,
+        )
+        advapi32.SaferCloseLevel(h_level)
+
+        if not ok or not h_restricted:
+            print(f"[_spawn_delevated] SaferComputeTokenFromLevel failed: {kernel32.GetLastError()}")
+            return False
+
+        # ── Step 3: duplicate the log file handle for child inheritance ───────
+        h_proc    = kernel32.GetCurrentProcess()
+        h_log     = msvcrt.get_osfhandle(log_fh.fileno())
+        h_log_dup = ctypes.wintypes.HANDLE(0)
+        kernel32.DuplicateHandle(
+            h_proc, ctypes.wintypes.HANDLE(h_log), h_proc,
+            ctypes.byref(h_log_dup), 0, True, DUPLICATE_SAME_ACCESS,
+        )
+
+        si             = _STARTUPINFOW()
+        si.cb          = ctypes.sizeof(_STARTUPINFOW)
+        si.dwFlags     = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES
+        si.wShowWindow = SW_HIDE
+        si.hStdOutput  = h_log_dup
+        si.hStdError   = h_log_dup
+        si.hStdInput   = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+
+        # ── Step 4: launch node.exe under the restricted token ────────────────
+        pi      = _PROCESS_INFORMATION()
+        cmd_str = subprocess.list2cmdline(cmd)
+        ok = advapi32.CreateProcessWithTokenW(
+            h_restricted, LOGON_WITH_PROFILE, None,
+            ctypes.create_unicode_buffer(cmd_str),
+            CREATE_NO_WINDOW, None,
+            ctypes.create_unicode_buffer(cwd),
+            ctypes.byref(si), ctypes.byref(pi),
+        )
+
+        kernel32.CloseHandle(h_restricted)
+        kernel32.CloseHandle(h_log_dup)
+
+        if not ok:
+            print(f"[_spawn_delevated] CreateProcessWithTokenW failed: {kernel32.GetLastError()}")
+            return False
+
+        kernel32.CloseHandle(pi.hThread)
+        main_window.evolution_process = _Win32Proc(pi.hProcess, int(pi.dwProcessId))
+        print("[_spawn_delevated] node.exe launched de-elevated via Safer API")
+        return True
+
+    except Exception as e:
+        print(f"[_spawn_delevated] failed: {e}")
+        return False
+
 
 class MainWindow(wx.Frame):
     def __init__(self):
@@ -177,11 +431,19 @@ class MainWindow(wx.Frame):
 
         # ── System tray icon ──────────────────────────────────────────────────
         self.tray_icon = None
+        # True while the window is physically hidden to tray (set in _on_close,
+        # cleared in restore_window).  Used to suppress tray-tooltip redraws
+        # while the window is visible — prevents NVDA focus disruption.
+        self._window_hidden = self.background_mode
         self._init_tray()
 
         # ── Notification manager ──────────────────────────────────────────────
         from core.notification_manager import NotificationManager
         self.notification_manager = NotificationManager(self)
+
+        # ── Global hotkey ─────────────────────────────────────────────────────
+        self._hotkey_manager = None
+        self._apply_global_hotkey()
 
         # Intercept window-close: hide to tray instead of quitting (when tray active)
         self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -206,30 +468,92 @@ class MainWindow(wx.Frame):
     # ── Menu bar ─────────────────────────────────────────────────────────────
 
     def _build_menubar(self):
-        """Create the Help menu bar with the Force Update item."""
-        self._ID_FORCE_UPDATE = wx.NewIdRef()
-        menubar    = wx.MenuBar()
-        help_menu  = wx.Menu()
+        """Create the menu bar with Arquivo and Ajuda menus."""
+        self._ID_MARK_ALL_READ = wx.NewIdRef()
+        self._ID_SHORTCUTS     = wx.NewIdRef()
+        self._ID_FORCE_UPDATE  = wx.NewIdRef()
+
+        menubar = wx.MenuBar()
+
+        # ── Arquivo ───────────────────────────────────────────────────────────
+        file_menu = wx.Menu()
+        file_menu.Append(
+            self._ID_MARK_ALL_READ,
+            f"{self.i18n.t('menu_mark_all_read')}\tCtrl+Shift+Alt+M",
+        )
+        menubar.Append(file_menu, self.i18n.t("menu_file"))
+
+        # ── Ajuda ─────────────────────────────────────────────────────────────
+        help_menu = wx.Menu()
+        help_menu.Append(
+            self._ID_SHORTCUTS,
+            f"{self.i18n.t('menu_shortcuts')}\tF1",
+        )
+        help_menu.AppendSeparator()
         help_menu.Append(self._ID_FORCE_UPDATE, self.i18n.t("menu_force_update"))
         menubar.Append(help_menu, self.i18n.t("menu_help"))
+
         self.SetMenuBar(menubar)
-        self.Bind(wx.EVT_MENU, self._on_force_update, id=self._ID_FORCE_UPDATE)
+        self.Bind(wx.EVT_MENU, self._on_mark_all_read, id=self._ID_MARK_ALL_READ)
+        self.Bind(wx.EVT_MENU, self.on_f1,             id=self._ID_SHORTCUTS)
+        self.Bind(wx.EVT_MENU, self._on_force_update,  id=self._ID_FORCE_UPDATE)
 
     def _refresh_menubar(self):
         """Retranslate the menu bar labels after a language change."""
         mb = self.GetMenuBar()
         if mb is None:
             return
-        mb.SetMenuLabel(0, self.i18n.t("menu_help"))
-        mb.GetMenu(0).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
+        mb.SetMenuLabel(0, self.i18n.t("menu_file"))
+        mb.GetMenu(0).FindItemById(self._ID_MARK_ALL_READ).SetItemLabel(
+            f"{self.i18n.t('menu_mark_all_read')}\tCtrl+Shift+Alt+M"
+        )
+        mb.SetMenuLabel(1, self.i18n.t("menu_help"))
+        mb.GetMenu(1).FindItemById(self._ID_SHORTCUTS).SetItemLabel(
+            f"{self.i18n.t('menu_shortcuts')}\tF1"
+        )
+        mb.GetMenu(1).FindItemById(self._ID_FORCE_UPDATE).SetItemLabel(
             self.i18n.t("menu_force_update")
         )
+
+    def _on_mark_all_read(self, event=None):
+        """Mark every conversation with unread messages as read."""
+        def _worker():
+            for jid, chat in list(self.chats.items()):
+                if int(chat.get("unreadCount") or 0) > 0:
+                    try:
+                        self.mark_conversation_as_read(jid)
+                    except Exception:
+                        pass
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_global_hotkey(self):
+        """Register (or unregister) the global hotkey from settings."""
+        if self._hotkey_manager is not None:
+            self._hotkey_manager.stop()
+            self._hotkey_manager = None
+        hk = self.settings.get("general", {}).get("global_hotkey")
+        if not hk or not isinstance(hk, dict):
+            return
+        vk  = hk.get("vk", 0)
+        mod = hk.get("mod", 0)
+        if vk:
+            self._hotkey_manager = _HotkeyManager(vk, mod, self.restore_window)
+
+    def set_global_hotkey(self, vk: int, mod: int):
+        """Save and apply a new global hotkey (vk=0 removes it)."""
+        self.settings.setdefault("general", {})
+        if vk:
+            self.settings["general"]["global_hotkey"] = {"vk": vk, "mod": mod}
+        else:
+            self.settings["general"].pop("global_hotkey", None)
+        self.save_settings()
+        self._apply_global_hotkey()
 
     def _set_status(self, status: str):
         """Update window title and tray tooltip to reflect current status."""
         self._tray_status = status
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None:
+        if getattr(self, "tray_icon", None) is not None and self._window_hidden:
             self.tray_icon.update_tooltip()
 
     def _update_title(self):
@@ -270,7 +594,7 @@ class MainWindow(wx.Frame):
             if getattr(self, "message_queue", None) is not None:
                 self.message_queue.flush()
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None:
+        if getattr(self, "tray_icon", None) is not None and self._window_hidden:
             self.tray_icon.update_tooltip()
 
     def _on_force_update(self, event):
@@ -373,6 +697,9 @@ class MainWindow(wx.Frame):
                 ctypes.windll.user32.ShowWindow(self.GetHandle(), 0)  # SW_HIDE = 0
             except Exception:
                 self.Hide()
+            self._window_hidden = True
+            # One authoritative tray update now that the window is hidden.
+            self.tray_icon.update_tooltip()
             event.Veto()
         else:
             self.real_exit()
@@ -392,6 +719,7 @@ class MainWindow(wx.Frame):
         SW_RESTORE = 9
         ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
         ctypes.windll.user32.SetForegroundWindow(hwnd)
+        self._window_hidden = False
         if hasattr(self, "conversations_panel"):
             wx.CallAfter(self.add_chats_to_ui)
 
@@ -497,13 +825,25 @@ class MainWindow(wx.Frame):
 
         # ── Update unread count (only for messages we received) ───────────────
         if not from_me:
-            chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
+            # Don't increment unread for the conversation already open — it is
+            # immediately visible to the user and will be marked as read.
+            _cp   = getattr(self, "conversations_panel", None)
+            _open = (
+                _cp is not None
+                and _cp.conversation is not None
+                and _cp.conversation.get("remoteJid") == remote_jid
+            )
+            if not _open:
+                chat["unreadCount"] = int(chat.get("unreadCount") or 0) + 1
 
-        # ── Persist ───────────────────────────────────────────────────────────
-        self.save_data(self.chats, self.contacts)
+        # ── Persist in background (encrypting 19 MB on the UI thread causes
+        #    noticeable freezes when messages arrive rapidly) ──────────────────
+        threading.Thread(
+            target=self.save_data, args=(self.chats, self.contacts), daemon=True
+        ).start()
 
-        # ── Update conversation list UI ───────────────────────────────────────
-        self.set_chats()
+        # ── Update conversation list UI (debounced to avoid rapid rebuilds) ───
+        self._schedule_set_chats()
 
         # ── Add message to the open conversation panel (if visible) ──────────
         if hasattr(self, "conversations_panel"):
@@ -765,6 +1105,10 @@ class MainWindow(wx.Frame):
         stdout and stderr are redirected to api/evolution.log so that startup
         errors can be shown to the user if the port never opens.
         Does nothing if the node or start.js files are not present (dev mode).
+
+        When the current process is elevated (run as Administrator) the child
+        is spawned using the non-elevated linked token via CreateProcessWithTokenW
+        so that PostgreSQL's initdb can start (it refuses to run as root/admin).
         """
         node_exe = resource_path("node", "node.exe")
         start_js  = resource_path("api",  "start.js")
@@ -774,14 +1118,22 @@ class MainWindow(wx.Frame):
             self._evolution_log_path = resource_path("api", "evolution.log")
             log_fh = open(self._evolution_log_path, "w",
                           encoding="utf-8", errors="replace")
-            self._evolution_log_fh = log_fh
-            self.evolution_process = subprocess.Popen(
-                [node_exe, start_js],
-                cwd=resource_path("api"),
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                stdout=log_fh,
-                stderr=log_fh,
-            )
+            self._evolution_log_fh   = log_fh
+            cwd                      = resource_path("api")
+            self.evolution_process   = None
+
+            spawned = False
+            if _is_elevated():
+                spawned = _spawn_delevated([node_exe, start_js], cwd, log_fh, self)
+
+            if not spawned:
+                self.evolution_process = subprocess.Popen(
+                    [node_exe, start_js],
+                    cwd=cwd,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    stdout=log_fh,
+                    stderr=log_fh,
+                )
             atexit.register(self._stop_evolution)
         except Exception:
             pass
@@ -1200,8 +1552,7 @@ class MainWindow(wx.Frame):
         self.chats = self.deduplicate_chats(self.chats)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_contacts()
-        if not self.background_mode:
-            self.connected_sound.play()
+        self.connected_sound.play()
         if self.settings.get("status", {}).get("messages_set_completed"):
             self.sync_thread = threading.Thread(target=self.start_sync, daemon=True)
             self.sync_thread.start()
@@ -1231,8 +1582,8 @@ class MainWindow(wx.Frame):
             time.sleep(_CHAT_DELAY)
         self.chats = self.normalize_chats(self.chats)
         self.contacts = self.get_remote_contacts()
+        self.synchronizing_sound.play()
         if not self.background_mode:
-            self.synchronizing_sound.play()
             wx.CallAfter(self._set_status, self.i18n.t("synchronizing"))
             self.output(self.i18n.t("synchronization_started"), interrupt=True)
 
@@ -1250,8 +1601,8 @@ class MainWindow(wx.Frame):
         # NOW — before the slower media-download phase begins.
         wx.CallAfter(self.set_chats)
         wx.CallAfter(self.preselect_conversations)
+        self.sync_complete_sound.play()
         if not self.background_mode:
-            self.sync_complete_sound.play()
             wx.CallAfter(self._set_status, "")
             self.output(self.i18n.t("sync_complete"))
 
@@ -1506,6 +1857,20 @@ class MainWindow(wx.Frame):
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('contact_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
 
+    def _is_self_jid(self, jid: str) -> bool:
+        """Return True if jid refers to the user's own WhatsApp account.
+        Bridges @lid JIDs before comparing so self-chats exposed as @lid are detected.
+        """
+        if not jid or jid.endswith("@g.us"):
+            return False
+        my_jid = getattr(self, "my_jid", "")
+        if not my_jid:
+            return False
+        compare = jid
+        if jid.endswith("@lid"):
+            compare = getattr(self, "_lid_to_phone", {}).get(jid, jid)
+        return compare.split("@")[0] == my_jid.split("@")[0]
+
     def set_chats(self):
         self._build_lid_to_phone_cache()
         deleted  = set(self.settings.get("deleted_chats",  []))
@@ -1515,6 +1880,7 @@ class MainWindow(wx.Frame):
         main_chats, main_names = [], []
         arch_chats, arch_names = [], []
 
+        my_jid = getattr(self, "my_jid", "")
         for jid, chat in self.chats.items():
             if jid in deleted:
                 continue
@@ -1526,6 +1892,10 @@ class MainWindow(wx.Frame):
                 or self.find_jid_through_messages(chat)
                 or (format_number(jid) if not jid.endswith("@lid") else "")
             )
+            # Detect self-chat (user messaging their own number).
+            # Bridge @lid before comparing so self-chats returned as @lid are caught.
+            if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
+                name = self.i18n.t("self_chat_name")
             if jid in archived:
                 arch_chats.append(chat)
                 arch_names.append(name)
@@ -1570,10 +1940,25 @@ class MainWindow(wx.Frame):
 
         if self.IsShown():
             self.add_chats_to_ui()
-        # Refresh title and tray tooltip whenever chat list / unread counts change
+        # Refresh title whenever chat list / unread counts change.
+        # Tray tooltip is only refreshed while the window is hidden — when
+        # visible the title already shows unread counts, and RemoveIcon/SetIcon
+        # disrupts NVDA focus (see tray_manager.py update_tooltip docstring).
         self._update_title()
-        if getattr(self, "tray_icon", None) is not None:
+        if getattr(self, "tray_icon", None) is not None and self._window_hidden:
             self.tray_icon.update_tooltip()
+
+    def _schedule_set_chats(self):
+        """Debounce set_chats() so rapid message bursts trigger only one rebuild.
+        Safe to call from any thread; scheduling happens on the wx main thread."""
+        if getattr(self, "_set_chats_pending", False):
+            return
+        self._set_chats_pending = True
+        wx.CallLater(300, self._do_scheduled_set_chats)
+
+    def _do_scheduled_set_chats(self):
+        self._set_chats_pending = False
+        self.set_chats()
 
     def _build_lid_to_phone_cache(self):
         """
@@ -1605,7 +1990,8 @@ class MainWindow(wx.Frame):
                     # NEW format (post-swap): remoteJid=phone, remoteJidAlt=lid
                     cache[alt] = remote
 
-        self._lid_to_phone = cache
+        self._lid_to_phone  = cache
+        self._phone_to_lid  = {v: k for k, v in cache.items()}
 
     def _find_alt_jid_from_messages(self, chat):
         """
@@ -1646,18 +2032,16 @@ class MainWindow(wx.Frame):
             return None  # groups don't have address-book entries
 
         def _name_from_contact(c):
-            # Evolution API v2 stores the contact name in Contact.pushName
-            # (derived from Baileys contact.name ?? contact.verifiedName).
-            # When neither field is set, Evolution API falls back to
-            # contact.id.split('@')[0] — a bare phone number.  Reject both
-            # purely-numeric strings ("5511999") and phone-like strings ("+55…").
-            name = c.get("pushName")
-            if not name or not isinstance(name, str):
-                return None
-            name = name.strip()
-            if not name or name.isdigit() or is_phone_like(name):
-                return None
-            return name
+            # Prefer the address-book name ('name') over the WhatsApp profile
+            # name ('pushName').  Both fields may be absent or a bare phone
+            # number — reject those in either case.
+            for field in ("name", "pushName"):
+                val = c.get(field)
+                if val and isinstance(val, str):
+                    val = val.strip()
+                    if val and not val.isdigit() and not is_phone_like(val):
+                        return val
+            return None
 
         # 1. Direct lookup by chat's own remoteJid
         contact = self.contacts.get(remoteJid)
@@ -1822,7 +2206,7 @@ class MainWindow(wx.Frame):
 
         if chat.get("messages", {}) and chat["messages"] != self.chats.get(remote_jid, {}).get("messages", {}): #update only if necessary
             self.chats[remote_jid] = chat
-            wx.CallAfter(self.set_chats)
+            wx.CallAfter(self._schedule_set_chats)
             self.save_data(self.chats, self.contacts)
 
     # WhatsApp CDN URLs (mmg.whatsapp.net) expire after ~90 days.  Attempting
@@ -1884,12 +2268,27 @@ class MainWindow(wx.Frame):
         message  = quoted.get("message")
         if not key_raw or not isinstance(key_raw, dict):
             return None
-        clean_key = {k: v for k, v in key_raw.items() if not k.startswith("_")}
+        _ALLOWED = {"id", "remoteJid", "fromMe", "participant"}
+        clean_key = {k: v for k, v in key_raw.items() if k in _ALLOWED}
         if not clean_key.get("id"):
             return None
         result = {"key": clean_key}
         if message and isinstance(message, dict):
-            result["message"] = message
+            # Flatten extendedTextMessage (reply-of-reply) to plain conversation so
+            # Baileys doesn't receive a nested contextInfo inside the quoted preview.
+            if "extendedTextMessage" in message:
+                text = (message["extendedTextMessage"] or {}).get("text", "")
+                if text:
+                    result["message"] = {"conversation": text}
+            else:
+                # Strip contextInfo from media message types to avoid chaining.
+                clean_msg = {}
+                for mtype, mcontent in message.items():
+                    if isinstance(mcontent, dict):
+                        clean_msg[mtype] = {k: v for k, v in mcontent.items() if k != "contextInfo"}
+                    else:
+                        clean_msg[mtype] = mcontent
+                result["message"] = clean_msg
         return result
 
     def _check_wa_connection_closed(self, response):
@@ -2010,6 +2409,33 @@ class MainWindow(wx.Frame):
         """
         if hasattr(self, "conversations_panel"):
             self.conversations_panel._mark_message_failed(local_id)
+
+    def on_message_status_update(self, update: dict):
+        """
+        Handle a messages.update WebSocket event on the main thread.
+        Updates MessageUpdate list on the cached message record and refreshes
+        the status icon shown in the active conversation.
+        """
+        key       = update.get("key", {})
+        msg_id    = key.get("id", "")
+        status    = update.get("status", "") or str(update.get("update", {}).get("status", ""))
+        if not msg_id or not status:
+            return
+        remote_jid = self._normalize_jid(key.get("remoteJid", ""))
+        if remote_jid not in self.chats:
+            return
+        records = (
+            self.chats[remote_jid]
+                .get("messages", {})
+                .get("messages", {})
+                .get("records", [])
+        )
+        for msg in records:
+            if msg.get("key", {}).get("id") == msg_id:
+                msg.setdefault("MessageUpdate", []).append({"status": status})
+                break
+        if hasattr(self, "conversations_panel"):
+            self.conversations_panel.refresh_message_status(msg_id, status)
 
     def handle_audio_message(self, msg):
         #First, check if the audio is already downloaded
@@ -2135,6 +2561,12 @@ class MainWindow(wx.Frame):
 
     def get_contact_profile(self, jid: str) -> dict:
         """Fetch contact profile from Evolution API (runs on background thread)."""
+        # The API only accepts phone-number JIDs; resolve @lid first.
+        if jid.endswith("@lid"):
+            resolved = getattr(self, "_lid_to_phone", {}).get(jid, "")
+            if not resolved:
+                return {}
+            jid = resolved
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
             f"/chat/fetchProfile/{self.token}"

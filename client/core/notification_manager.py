@@ -263,7 +263,32 @@ class NotificationManager:
             title, body, remote_jid = item
             self._dispatch(title, body, remote_jid)
 
+    @staticmethod
+    def _register_aumid_registry():
+        """Write HKCU\\SOFTWARE\\Classes\\AppUserModelId\\WinZapp to the registry.
+
+        The windows-toasts library (and WinRT in general) requires the AUMID to be
+        registered in the user-hive registry before a toast can be sent from an
+        unpackaged app.  Installed builds have this key written by the NSIS
+        installer; portable/zip builds have no installer, so we register it here
+        at runtime.  Writing the same values twice is harmless.
+        """
+        try:
+            import winreg
+            key_path = r"SOFTWARE\Classes\AppUserModelId\WinZapp"
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path,
+                                    0, winreg.KEY_WRITE) as key:
+                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "WinZapp")
+                if _is_frozen():
+                    winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, sys.executable)
+        except Exception as e:
+            print(f"[NotificationManager] AUMID registry write failed: {e}")
+
     def _setup_toaster(self):
+        # Ensure the AUMID is registered in the current-user registry so that
+        # portable builds (which have no NSIS installer) can send toasts.
+        self._register_aumid_registry()
+
         # Build a prioritised list of AUMID candidates to try.
         # Installed build: registered AUMID "WinZapp" first, exe path as fallback.
         # Dev build / portable: exe path (always available, recognised by Windows).

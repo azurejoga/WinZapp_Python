@@ -21,8 +21,9 @@ class WebSocketClient:
         self.sio.on("connection.update", self.on_connection_update, namespace=f"/{self.instance_name}")
         self.sio.on("qrcode.updated", self.on_qrcode_update, namespace=f"/{self.instance_name}")
         self.sio.on("messages.set", self.on_messages_set, namespace=f"/{self.instance_name}")
-        self.sio.on("messages.upsert", self.on_messages_upsert, namespace=f"/{self.instance_name}")
-        self.sio.on("contacts.update", self.on_contacts_update, namespace=f"/{self.instance_name}")
+        self.sio.on("messages.upsert",  self.on_messages_upsert,  namespace=f"/{self.instance_name}")
+        self.sio.on("messages.update",  self.on_messages_update,  namespace=f"/{self.instance_name}")
+        self.sio.on("contacts.update",  self.on_contacts_update,  namespace=f"/{self.instance_name}")
 
     def on_connect(self):
         print("WebSocket connected.")
@@ -33,8 +34,14 @@ class WebSocketClient:
     def on_connection_update(self, info):
         print(info)
         #Checks the new connection state
-        connection_state = info.get("data", {}).get("state", "")
+        data             = info.get("data", {})
+        connection_state = data.get("state", "")
         if connection_state == "open":
+            # Store the user's own JID so self-chat detection and group-admin
+            # checks have access to it throughout the session.
+            wuid = data.get("wuid", "")
+            if wuid:
+                self.main_window.my_jid = wuid
             # Mark WhatsApp as connected so the MessageQueue resumes sending.
             self.main_window._wa_connected = True
             if hasattr(self.main_window, "message_queue"):
@@ -127,6 +134,30 @@ class WebSocketClient:
         except Exception as e:
             print(f"[WebSocketClient] on_messages_upsert error: {e}")
 
+    def on_messages_update(self, info):
+        """
+        Handle messages.update — delivery/read status changes for sent messages.
+
+        Evolution API v2 sends:
+          {"data": [{"key": {"id": ..., "remoteJid": ..., "fromMe": true},
+                     "status": "READ"|"DELIVERY_ACK"|"SERVER_ACK",
+                     "update": {"status": 4}}]}
+        """
+        try:
+            data = info.get("data", [])
+            if isinstance(data, dict):
+                data = [data]
+            if not isinstance(data, list):
+                return
+            for update in data:
+                if not isinstance(update, dict):
+                    continue
+                if not update.get("key", {}).get("fromMe"):
+                    continue
+                wx.CallAfter(self.main_window.on_message_status_update, update)
+        except Exception as e:
+            print(f"[WebSocketClient] on_messages_update error: {e}")
+
     def on_contacts_update(self, info):
         """
         Handle contacts.update to keep contact names and pictures fresh.
@@ -158,7 +189,8 @@ class WebSocketClient:
                 if contact.get("profilePicUrl"):
                     existing["profilePicUrl"] = contact["profilePicUrl"]
             if updated:
-                # Refresh conversation names shown in the UI
-                wx.CallAfter(self.main_window.set_chats)
+                # Refresh conversation names shown in the UI (debounced —
+                # contacts.update can fire in bursts for many contacts at once)
+                wx.CallAfter(self.main_window._schedule_set_chats)
         except Exception as e:
             print(f"[WebSocketClient] on_contacts_update error: {e}")
