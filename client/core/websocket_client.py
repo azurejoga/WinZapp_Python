@@ -1,4 +1,5 @@
 import threading
+import time
 import socketio
 import wx
 from core.i18n import I18n
@@ -23,10 +24,15 @@ class WebSocketClient:
         self.sio.on("messages.set", self.on_messages_set, namespace=f"/{self.instance_name}")
         self.sio.on("messages.upsert",  self.on_messages_upsert,  namespace=f"/{self.instance_name}")
         self.sio.on("messages.update",  self.on_messages_update,  namespace=f"/{self.instance_name}")
+        self.sio.on("chats.update",     self.on_chats_update,     namespace=f"/{self.instance_name}")
         self.sio.on("contacts.update",  self.on_contacts_update,  namespace=f"/{self.instance_name}")
+        self.sio.on("presence.update",  self.on_presence_update,  namespace=f"/{self.instance_name}")
 
     def on_connect(self):
         print("WebSocket connected.")
+        # Record when we connected so on_messages_upsert can use a stable
+        # cutoff time rather than the ever-advancing time.time().
+        self._connect_time = time.time()
 
     def on_disconnect(self):
         print("WebSocket disconnected.")
@@ -122,13 +128,35 @@ class WebSocketClient:
             msg = info.get("data", {})
             if not isinstance(msg, dict) or not msg.get("key"):
                 return
-            # Skip reactions — they update an existing message, not a new one
-            if msg.get("messageType") == "reactionMessage":
-                return
-            # Skip messages sent by ourselves (fromMe=True means we sent it;
-            # the MessageQueue already handles those in the UI)
+            # Guard: ignore messages older than 60 seconds before the last
+            # WebSocket connection.  Using _connect_time as the reference point
+            # (rather than the ever-advancing time.time()) means that a message
+            # sent 45 s before the app started is still eligible even if the
+            # Evolution API burst arrives 30 s after the WebSocket connected —
+            # using time.time() in that case would make the message look 75 s
+            # old and block it incorrectly.
+            ts = msg.get("messageTimestamp")
+            if ts:
+                try:
+                    cutoff = getattr(self, "_connect_time", time.time()) - 60
+                    if int(ts) < cutoff:
+                        return
+                except (TypeError, ValueError):
+                    pass
+            # fromMe=True can mean two things:
+            #   (a) WinZapp sent this message via MessageQueue — already rendered
+            #       in the UI; the WebSocket echo must be ignored.
+            #   (b) The user sent this message from another device (phone, official
+            #       Windows app) — must be added to the conversation like any
+            #       incoming message (but without playing a notification sound).
+            # We distinguish the two cases via _own_sent_ids, which is populated
+            # by MessageQueue immediately after the API returns the real message ID.
             if msg.get("key", {}).get("fromMe", False):
-                return
+                msg_id    = msg.get("key", {}).get("id", "")
+                own_ids   = getattr(self.main_window, "_own_sent_ids", set())
+                if msg_id and msg_id in own_ids:
+                    return  # echo of our own send — skip
+                # Otherwise: sent from another device — fall through to on_new_message
             wx.CallAfter(self.main_window.on_new_message, msg)
 
         except Exception as e:
@@ -157,6 +185,52 @@ class WebSocketClient:
                 wx.CallAfter(self.main_window.on_message_status_update, update)
         except Exception as e:
             print(f"[WebSocketClient] on_messages_update error: {e}")
+
+    def on_chats_update(self, info):
+        """
+        Handle chats.update — partial chat state changes (e.g. unreadCount reset
+        when the user reads messages on another device via app-state sync).
+
+        Evolution API emits:
+          {"data": [{"remoteJid": ..., "unreadCount": 0, ...}]}
+        """
+        try:
+            data = info.get("data", [])
+            if isinstance(data, dict):
+                data = [data]
+            if not isinstance(data, list):
+                return
+            for chat_update in data:
+                if not isinstance(chat_update, dict):
+                    continue
+                jid = chat_update.get("remoteJid") or chat_update.get("id", "")
+                if not jid:
+                    continue
+                unread = chat_update.get("unreadCount")
+                if unread is not None:
+                    wx.CallAfter(self.main_window.on_chat_unread_update, jid, int(unread))
+        except Exception as e:
+            print(f"[WebSocketClient] on_chats_update error: {e}")
+
+    def on_presence_update(self, info):
+        """
+        Handle presence.update — online/typing/last-seen changes for contacts.
+
+        Evolution API wraps the Baileys payload as:
+          {"data": {"id": "55XXX@s.whatsapp.net",
+                    "presences": {"55XXX@s.whatsapp.net": {
+                        "lastKnownPresence": "available"|"unavailable"|"composing"|...,
+                        "lastSeen": <unix_ts>|null}}}}
+        """
+        try:
+            data      = info.get("data", {})
+            jid       = data.get("id", "")
+            presences = data.get("presences", {})
+            if not jid or not isinstance(presences, dict):
+                return
+            wx.CallAfter(self.main_window.on_presence_update, jid, presences)
+        except Exception as e:
+            print(f"[WebSocketClient] on_presence_update error: {e}")
 
     def on_contacts_update(self, info):
         """

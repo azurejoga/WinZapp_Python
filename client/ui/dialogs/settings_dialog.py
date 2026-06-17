@@ -9,45 +9,96 @@ _MOD_SHIFT   = 0x0004
 _MOD_WIN     = 0x0008
 
 
+class _HotkeyCaptureAccessible(wx.Accessible):
+    """Expose the hotkey capture field as a real hotkey field to screen readers."""
+
+    def __init__(self, ctrl, name=""):
+        super().__init__()
+        self._ctrl = ctrl
+        self._name = name
+
+    def SetNameText(self, name: str):
+        self._name = name
+
+    def GetName(self, childId):
+        return (wx.ACC_OK, self._name or self._ctrl.GetHint())
+
+    def GetRole(self, childId):
+        return (wx.ACC_OK, wx.ROLE_SYSTEM_HOTKEYFIELD)
+
+    def GetValue(self, childId):
+        return (wx.ACC_OK, self._ctrl.GetValue())
+
+    def GetDescription(self, childId):
+        return (wx.ACC_OK, self._ctrl.GetHint())
+
+
 class _HotkeyCapture(wx.TextCtrl):
     """
-    Read-only TextCtrl that captures the next key combination pressed while
-    focused and stores it as (vk, mod) for use with RegisterHotKey.
+    TextCtrl that captures the next key combination pressed while focused and
+    stores it as (vk, mod) for use with RegisterHotKey.
 
-    Leave the field empty (Delete or Backspace) to clear the hotkey.
+    Tab / Shift+Tab always navigate focus normally.
+    Delete or Backspace clears the hotkey.
+    A combination with Ctrl or Alt (e.g. Ctrl+Shift+W) is recorded.
     """
 
-    def __init__(self, parent):
-        super().__init__(parent, style=wx.TE_READONLY | wx.TE_PROCESS_ENTER)
+    def __init__(self, parent, accessible_name=""):
+        # No TE_READONLY — that flag removes the control from the Tab order on
+        # Windows, making it unreachable for screen-reader users.  Character
+        # insertion is blocked via EVT_CHAR instead.
+        super().__init__(parent, style=wx.TE_PROCESS_ENTER)
         self._vk  = 0
         self._mod = 0
+        self._accessible = _HotkeyCaptureAccessible(self, accessible_name)
+        self.SetName(accessible_name)
+        self.SetAccessible(self._accessible)
         self.Bind(wx.EVT_KEY_DOWN, self._on_key_down)
+        self.Bind(wx.EVT_CHAR,     self._on_char)
         self.Bind(wx.EVT_SET_FOCUS, self._on_focus)
+
+    def SetAccessibleName(self, name: str):
+        self.SetName(name)
+        self._accessible.SetNameText(name)
 
     def _on_focus(self, event):
         self.SelectAll()
         event.Skip()
 
+    def _on_char(self, event):
+        # Block all character input; Tab is allowed through for focus traversal.
+        if event.GetKeyCode() == wx.WXK_TAB:
+            event.Skip()
+
     def _on_key_down(self, event):
         vk = event.GetRawKeyCode()
-        if vk in (0, 0x10, 0x11, 0x12, 0x5B, 0x5C):
-            # Pure modifier keys — wait for a non-modifier
+
+        # Tab / Shift+Tab: always let focus move normally.
+        if vk == wx.WXK_TAB:
             event.Skip()
             return
+
+        # Pure modifier keys (Ctrl, Alt, Shift, Win) — wait for a non-modifier.
+        if vk in (0, 0x10, 0x11, 0x12, 0x5B, 0x5C):
+            event.Skip()
+            return
+
+        # Delete / Backspace: clear the captured hotkey.
         if vk in (wx.WXK_DELETE, wx.WXK_BACK):
-            # Clear the hotkey
             self._vk  = 0
             self._mod = 0
             self.SetValue("")
             return
+
         mod = 0
         if event.ControlDown(): mod |= _MOD_CONTROL
         if event.AltDown():     mod |= _MOD_ALT
         if event.ShiftDown():   mod |= _MOD_SHIFT
-        # Require at least one modifier (otherwise any key would capture)
-        if not mod:
-            event.Skip()
-            return
+
+        # Require Ctrl or Alt so that plain letters and Shift+Tab don't capture.
+        if not (mod & (_MOD_CONTROL | _MOD_ALT)):
+            return  # consume silently — EVT_CHAR is also blocked by _on_char
+
         self._vk  = vk
         self._mod = mod
         from main import _vk_mod_to_str
@@ -128,11 +179,15 @@ class SettingsDialog(wx.Dialog):
         )
         gen_sizer.Add(self._updates_check, 0, wx.ALL, 8)
 
+        self._hotkey_label = wx.StaticText(self._general_page, label=i18n.t("global_hotkey_label"))
         gen_sizer.Add(
-            wx.StaticText(self._general_page, label=i18n.t("global_hotkey_label")),
+            self._hotkey_label,
             0, wx.LEFT | wx.TOP | wx.RIGHT, 8,
         )
-        self._hotkey_field = _HotkeyCapture(self._general_page)
+        self._hotkey_field = _HotkeyCapture(
+            self._general_page,
+            accessible_name=i18n.t("global_hotkey_label"),
+        )
         self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))
         gen_sizer.Add(self._hotkey_field, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -167,6 +222,27 @@ class SettingsDialog(wx.Dialog):
         focus_sizer.Add(self._focus_unread_or_last_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5)
 
         ui_sizer.Add(focus_sizer, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._voice_focus_box = wx.StaticBox(
+            self._ui_page, label=i18n.t("ui_voice_record_focus_label")
+        )
+        voice_focus_sizer = wx.StaticBoxSizer(self._voice_focus_box, wx.VERTICAL)
+
+        self._voice_focus_send_rb = wx.RadioButton(
+            self._voice_focus_box,
+            label=i18n.t("ui_voice_record_focus_send"),
+            style=wx.RB_GROUP,
+        )
+        voice_focus_sizer.Add(self._voice_focus_send_rb, 0, wx.LEFT | wx.TOP, 5)
+
+        self._voice_focus_discard_rb = wx.RadioButton(
+            self._voice_focus_box, label=i18n.t("ui_voice_record_focus_discard")
+        )
+        voice_focus_sizer.Add(
+            self._voice_focus_discard_rb, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 5
+        )
+
+        ui_sizer.Add(voice_focus_sizer, 0, wx.EXPAND | wx.ALL, 8)
 
         self._ui_page.SetSizer(ui_sizer)
         self._notebook.AddPage(self._ui_page, i18n.t("tab_ui"))
@@ -267,6 +343,14 @@ class SettingsDialog(wx.Dialog):
         else:
             self._focus_message_field_rb.SetValue(True)
 
+        voice_record_focus = self.main_window.settings.get("user_interface", {}).get(
+            "voice_record_focus", "send"
+        )
+        if voice_record_focus == "discard":
+            self._voice_focus_discard_rb.SetValue(True)
+        else:
+            self._voice_focus_send_rb.SetValue(True)
+
         self._port_field.SetValue(str(self.main_window.evolution_port))
 
         saved_speed = self.main_window.settings.get("audio_playback", {}).get("audio_default_speed", 1.0)
@@ -329,6 +413,15 @@ class SettingsDialog(wx.Dialog):
             else "message_field"
         )
         self.main_window.settings.setdefault("user_interface", {})["focus_on_open"] = focus_on_open
+
+        # UI: focus when recording a voice message
+        voice_record_focus = (
+            "discard" if self._voice_focus_discard_rb.GetValue()
+            else "send"
+        )
+        self.main_window.settings.setdefault("user_interface", {})[
+            "voice_record_focus"
+        ] = voice_record_focus
 
         # Port
         port = int(self._port_field.GetValue().strip())
@@ -427,6 +520,12 @@ class SettingsDialog(wx.Dialog):
         self._focus_box.SetLabel(i18n.t("ui_focus_label"))
         self._focus_message_field_rb.SetLabel(i18n.t("ui_focus_message_field"))
         self._focus_unread_or_last_rb.SetLabel(i18n.t("ui_focus_unread_or_last"))
+        self._voice_focus_box.SetLabel(i18n.t("ui_voice_record_focus_label"))
+        self._voice_focus_send_rb.SetLabel(i18n.t("ui_voice_record_focus_send"))
+        self._voice_focus_discard_rb.SetLabel(i18n.t("ui_voice_record_focus_discard"))
+        self._hotkey_label.SetLabel(i18n.t("global_hotkey_label"))
+        self._hotkey_field.SetAccessibleName(i18n.t("global_hotkey_label"))
+        self._hotkey_field.SetHint(i18n.t("global_hotkey_hint"))
         self._ok_btn.SetLabel(i18n.t("ok"))
         self._cancel_btn.SetLabel(i18n.t("cancel"))
         self._apply_btn.SetLabel(i18n.t("apply"))

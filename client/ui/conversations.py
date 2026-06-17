@@ -86,6 +86,14 @@ class ConversationsPanel(wx.Panel):
             self._audio_speed_index = 0
         self._audio_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_audio_timer, self._audio_timer)
+        # msg_id → position (samples) saved when a *different* audio starts while
+        # this one is still mid-play.  Restored the next time _play_audio() is
+        # called for the same message so playback resumes where it was left off.
+        self._audio_positions: dict = {}
+        # JID of the conversation where the current audio was started; used by
+        # _auto_chain_next_audio and navigate_to_conversation to avoid operating
+        # on the wrong conversation's message list.
+        self._audio_conv_jid: str = ""
 
         # ── Voice recording state ───────────────────────────────────────────
         self._is_recording         = False
@@ -169,6 +177,24 @@ class ConversationsPanel(wx.Panel):
         self._new_conv_btn.SetAccessible(AccessibleNewConversationButton())
         self._new_conv_btn.Bind(wx.EVT_BUTTON, self._on_new_conversation)
         outer_sizer.Add(self._new_conv_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 5)
+
+        # ── Conversation filter tabs ─────────────────────────────────────────
+        # Tracks the active filter key: 'all' | 'unread' | 'groups' | 'individual'
+        self._conv_filter = 'all'
+        self._filter_radio = wx.RadioBox(
+            self,
+            label=i18n.t("conv_filter_label"),
+            choices=[
+                i18n.t("conv_filter_all"),
+                i18n.t("conv_filter_unread"),
+                i18n.t("conv_filter_groups"),
+                i18n.t("conv_filter_individual"),
+            ],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_ROWS,
+        )
+        self._filter_radio.Bind(wx.EVT_RADIOBOX, self._on_filter_changed)
+        outer_sizer.Add(self._filter_radio, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 5)
 
         # ── Conversations list ──────────────────────────────────────────────
         self.conversations_label = wx.StaticText(self, label=i18n.t("conversations"))
@@ -449,6 +475,7 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._voice_panel, 0, wx.LEFT | wx.BOTTOM, 5)
 
         self.conversation_panel.SetSizer(conv_sizer)
+        self.conversation_panel.Bind(wx.EVT_CHAR_HOOK, self._on_conversation_char_hook)
         self.conversation_panel.Hide()
         outer_sizer.Add(self.conversation_panel, 1, wx.EXPAND | wx.ALL, 5)
 
@@ -461,18 +488,43 @@ class ConversationsPanel(wx.Panel):
         self.ID_CTRL_N              = wx.NewIdRef()
         self.ID_DELETE_CONV         = wx.NewIdRef()
         self.ID_ALT_SHIFT_C_LIST    = wx.NewIdRef()  # copy number from chat list
+        self.ID_CONV_DATA_LIST      = wx.NewIdRef()
+        self.ID_TOGGLE_READ_LIST    = wx.NewIdRef()
+        self.ID_MUTE_LIST           = wx.NewIdRef()
+        self.ID_BLOCK_LIST          = wx.NewIdRef()
+        self.ID_CLEAR_LIST          = wx.NewIdRef()
+        self.ID_ARCHIVE_LIST        = wx.NewIdRef()
+        self.ID_PIN_LIST            = wx.NewIdRef()
+        self.ID_CLOSE_CONV_LIST     = wx.NewIdRef()
+        CS = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
         AS = wx.ACCEL_ALT | wx.ACCEL_SHIFT
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL,   ord("F"),        self.ID_CTRL_F),
             (wx.ACCEL_CTRL,   ord("N"),        self.ID_CTRL_N),
             (wx.ACCEL_NORMAL, wx.WXK_DELETE,   self.ID_DELETE_CONV),
             (AS,              ord("C"),         self.ID_ALT_SHIFT_C_LIST),
+            (CS,              ord("D"),         self.ID_CONV_DATA_LIST),
+            (CS,              ord("M"),         self.ID_TOGGLE_READ_LIST),
+            (AS,              ord("S"),         self.ID_MUTE_LIST),
+            (CS,              ord("B"),         self.ID_BLOCK_LIST),
+            (CS,              ord("L"),         self.ID_CLEAR_LIST),
+            (wx.ACCEL_CTRL,   ord("Q"),         self.ID_ARCHIVE_LIST),
+            (wx.ACCEL_CTRL,   ord("P"),         self.ID_PIN_LIST),
+            (wx.ACCEL_CTRL,   ord("W"),         self.ID_CLOSE_CONV_LIST),
         ])
         self.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_ctrl_f,                    id=self.ID_CTRL_F)
         self.Bind(wx.EVT_MENU, self._on_new_conversation,         id=self.ID_CTRL_N)
         self.Bind(wx.EVT_MENU, self._on_accel_delete_conv,        id=self.ID_DELETE_CONV)
         self.Bind(wx.EVT_MENU, self._on_accel_copy_number_list,   id=self.ID_ALT_SHIFT_C_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_conversation_data_list, id=self.ID_CONV_DATA_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_toggle_read_list,    id=self.ID_TOGGLE_READ_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_mute_list,           id=self.ID_MUTE_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_block_list,          id=self.ID_BLOCK_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_clear_list,          id=self.ID_CLEAR_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_archive_list,        id=self.ID_ARCHIVE_LIST)
+        self.Bind(wx.EVT_MENU, self._on_accel_pin_list,            id=self.ID_PIN_LIST)
+        self.Bind(wx.EVT_MENU, self.on_context_menu_close,         id=self.ID_CLOSE_CONV_LIST)
 
     def create_accel_conversation(self):
         # ── Navigation / recording ──────────────────────────────────────────
@@ -509,6 +561,9 @@ class ConversationsPanel(wx.Panel):
         self.ID_ALT_SHIFT_V     = wx.NewIdRef()  # converse with           (Alt+Shift+V)
         self.ID_ALT_SHIFT_Q     = wx.NewIdRef()  # goto quoted message     (Alt+Shift+Q)
         self.ID_ALT_SHIFT_S     = wx.NewIdRef()  # mute / unmute           (Alt+Shift+S)
+        # ── Audio speed ──────────────────────────────────────────────────────
+        self.ID_ALT_COMMA       = wx.NewIdRef()  # decrease audio speed    (Alt+,)
+        self.ID_ALT_PERIOD      = wx.NewIdRef()  # increase audio speed    (Alt+.)
 
         CS  = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
         AS  = wx.ACCEL_ALT  | wx.ACCEL_SHIFT
@@ -538,6 +593,8 @@ class ConversationsPanel(wx.Panel):
             (AS,               ord("V"),          self.ID_ALT_SHIFT_V),
             (AS,               ord("Q"),          self.ID_ALT_SHIFT_Q),
             (AS,               ord("S"),          self.ID_ALT_SHIFT_S),
+            (wx.ACCEL_ALT,     ord(","),           self.ID_ALT_COMMA),
+            (wx.ACCEL_ALT,     ord("."),           self.ID_ALT_PERIOD),
         ])
         self.conversation_panel.SetAcceleratorTable(accel_tbl)
         self.Bind(wx.EVT_MENU, self.on_record_voice_message,       id=self.ID_CTRL_R)
@@ -565,6 +622,8 @@ class ConversationsPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, self._on_accel_alt_shift_v,         id=self.ID_ALT_SHIFT_V)
         self.Bind(wx.EVT_MENU, self._on_accel_goto_quoted,         id=self.ID_ALT_SHIFT_Q)
         self.Bind(wx.EVT_MENU, self._on_accel_mute,                id=self.ID_ALT_SHIFT_S)
+        self.Bind(wx.EVT_MENU, self._on_audio_speed_decrease,      id=self.ID_ALT_COMMA)
+        self.Bind(wx.EVT_MENU, self._on_audio_speed_increase,      id=self.ID_ALT_PERIOD)
 
     # ── Conversations list events ───────────────────────────────────────────
 
@@ -578,7 +637,18 @@ class ConversationsPanel(wx.Panel):
             return
 
     def navigate_to_conversation(self, conversation):
-        self._stop_audio()
+        # Audio keeps playing across conversation switches.  Save the current
+        # position so it can be restored if the same message is played again
+        # after a different audio has taken over and closed the stream.
+        if self._current_audio_id is not None and self._audio_stream is not None:
+            try:
+                _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+                pos   = _ctrl.get_position()
+                total = _ctrl.get_length()
+                if 0 < pos < total:
+                    self._audio_positions[self._current_audio_id] = pos
+            except Exception:
+                pass
         self._hide_audio_controls()
         self._hide_all_media_controls()
         self._hide_attachment_panel()
@@ -639,6 +709,16 @@ class ConversationsPanel(wx.Panel):
             self.search_field.Clear()
         self.populate_messages()
 
+        # If audio was already playing for THIS conversation before we navigated
+        # away, re-show the controls so the user can see the progress/speed bar.
+        if (self._current_audio_id is not None
+                and self._audio_conv_jid == jid
+                and self._audio_stream is not None):
+            self._show_audio_controls()
+            self.audio_speed_btn.SetLabel(
+                self._format_speed(self._audio_speed_steps[self._audio_speed_index])
+            )
+
         # Set focus based on user preference
         focus_setting = self.main_window.settings.get("user_interface", {}).get("focus_on_open", "message_field")
         if focus_setting == "unread_or_last":
@@ -658,31 +738,16 @@ class ConversationsPanel(wx.Panel):
         self.messages_list.Select(0)
 
     def on_search_query_changed(self, event):
-        query    = self.search_field.GetValue().lower()
-        mw       = self.main_window
-        deleted  = set(mw.settings.get("deleted_chats",  []))
-        archived = set(mw.settings.get("archived_chats", []))
+        # Route through add_chats_to_ui so the active filter and proper sort
+        # order are both respected (add_chats_to_ui reads search_field itself).
+        self.main_window.add_chats_to_ui()
 
-        self.chats_list = []
-        self.chat_names = []
-        self.conversations_list.DeleteAllItems()
-
-        for jid, chat in mw.chats.items():
-            if jid in deleted or jid in archived:
-                continue
-            name = (
-                mw._resolve_contact_name(chat)
-                or mw.find_name_through_messages(chat)
-                or chat.get("name", "")
-                or chat.get("pushName", "")
-                or mw.find_jid_through_messages(chat)
-                or format_number(jid)
-            )
-            if not query or query in name.lower():
-                self.conversations_list.Append((name,))
-                self.chats_list.append(chat)
-                self.chat_names.append(name)
-        mw.preselect_conversations()
+    def _on_filter_changed(self, event):
+        """Update the active conversation filter and rebuild the list."""
+        _filter_map = ['all', 'unread', 'groups', 'individual']
+        sel = self._filter_radio.GetSelection()
+        self._conv_filter = _filter_map[sel] if 0 <= sel < len(_filter_map) else 'all'
+        self.main_window.add_chats_to_ui()
 
     def on_ctrl_f(self, event):
         self.search_field.SetFocus()
@@ -699,6 +764,37 @@ class ConversationsPanel(wx.Panel):
             self.send_message_btn.Hide()
             self.record_voice_message_btn.Show()
 
+    def _on_conversation_char_hook(self, event):
+        if not self._should_redirect_char_to_message(event):
+            event.Skip()
+            return
+
+        char = chr(event.GetUnicodeKey())
+        self.message_field.SetFocus()
+        self.message_field.WriteText(char)
+
+    def _should_redirect_char_to_message(self, event) -> bool:
+        if self.conversation is None or not self.conversation_panel.IsShown():
+            return False
+        if not self.message_field.IsShown() or not self.message_field.IsEnabled():
+            return False
+        if self._is_recording:
+            return False
+        if event.ControlDown() or event.AltDown() or event.ShiftDown():
+            return False
+        if hasattr(event, "MetaDown") and event.MetaDown():
+            return False
+
+        key = event.GetUnicodeKey()
+        if key == wx.WXK_NONE or key <= 32:
+            return False
+
+        focus = wx.Window.FindFocus()
+        if focus is self.message_field or isinstance(focus, wx.TextCtrl):
+            return False
+
+        return True
+
     def refresh_labels(self):
         """Update all translatable labels and column headers after a language change."""
         i18n = self.main_window.i18n
@@ -708,6 +804,14 @@ class ConversationsPanel(wx.Panel):
         col.SetText(i18n.t("conversations"))
         self.conversations_list.SetColumn(0, col)
         self.search_label.SetLabel(i18n.t("search_conversations"))
+
+        if hasattr(self, "_filter_radio"):
+            self._filter_radio.SetLabel(i18n.t("conv_filter_label"))
+            for _fi, _fk in enumerate([
+                "conv_filter_all", "conv_filter_unread",
+                "conv_filter_groups", "conv_filter_individual",
+            ]):
+                self._filter_radio.SetItemLabel(_fi, i18n.t(_fk))
 
         self._new_conv_btn.SetLabel(i18n.t("new_conversation"))
         self._search_open_btn.SetLabel(i18n.t("search_in_conv"))
@@ -819,6 +923,13 @@ class ConversationsPanel(wx.Panel):
             "messageTimestamp": int(time.time()),
             "pushName":         "",
         }
+        if self._quoted_message:
+            _qk = self._quoted_message.get("key", {})
+            virtual_msg["contextInfo"] = {
+                "stanzaId":      _qk.get("id", ""),
+                "participant":   _qk.get("participant", ""),
+                "quotedMessage": self._quoted_message.get("message") or {},
+            }
 
         # Add to sorted list and UI list immediately.
         self._sorted_messages.append(virtual_msg)
@@ -975,7 +1086,7 @@ class ConversationsPanel(wx.Panel):
 
         self._is_recording = True
 
-        # UI: play sound, swap buttons, focus Discard.
+        # UI: play sound, swap buttons, focus the configured recording action.
         self.main_window.voicemsg_startrecording_sound.play()
         self.send_message_btn.Hide()
         self.record_voice_message_btn.Hide()
@@ -985,7 +1096,13 @@ class ConversationsPanel(wx.Panel):
         )
         self._voice_panel.Show()
         self.conversation_panel.Layout()
-        self._discard_voice_btn.SetFocus()
+        voice_focus = self.main_window.settings.get("user_interface", {}).get(
+            "voice_record_focus", "send"
+        )
+        if voice_focus == "discard":
+            self._discard_voice_btn.SetFocus()
+        else:
+            self._send_voice_btn.SetFocus()
 
     def _stop_recording_stream(self):
         """Stop and close the active InputStream (safe to call when None)."""
@@ -1083,6 +1200,13 @@ class ConversationsPanel(wx.Panel):
             "messageTimestamp": int(time.time()),
             "pushName":         "",
         }
+        if self._quoted_message:
+            _qk = self._quoted_message.get("key", {})
+            virtual_msg["contextInfo"] = {
+                "stanzaId":      _qk.get("id", ""),
+                "participant":   _qk.get("participant", ""),
+                "quotedMessage": self._quoted_message.get("message") or {},
+            }
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
         last = self.messages_list.GetItemCount() - 1
@@ -1109,7 +1233,6 @@ class ConversationsPanel(wx.Panel):
             self._recording_frames = []
             self._voice_panel.Hide()
             self.record_voice_message_btn.Show()
-        self._stop_audio()
         self._hide_audio_controls()
         self._hide_all_media_controls()
         self._hide_attachment_panel()
@@ -2006,15 +2129,35 @@ class ConversationsPanel(wx.Panel):
         if msg_id == self._current_audio_id and self._audio_stream is not None:
             _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
             if self._is_audio_playing:
-                _ctrl.pause()
+                try:
+                    _ctrl.pause()
+                except Exception:
+                    # BASS may report "not playing" if the user switches
+                    # messages faster than the audio backend updates state.
+                    pass
                 self._is_audio_playing = False
                 self._audio_timer.Stop()
             else:
-                _ctrl.play()
+                try:
+                    _ctrl.play()
+                except Exception:
+                    self._stop_audio()
+                    return
                 self._is_audio_playing = True
                 self._audio_timer.Start(200)
             return
 
+        # Save position of the outgoing audio before the stream is destroyed so
+        # the user can resume it later if they come back to that message.
+        if self._current_audio_id is not None and self._audio_stream is not None:
+            try:
+                _ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+                pos   = _ctrl.get_position()
+                total = _ctrl.get_length()
+                if 0 < pos < total:
+                    self._audio_positions[self._current_audio_id] = pos
+            except Exception:
+                pass
         self._stop_audio()
 
         if os.path.isfile(file_path):
@@ -2087,8 +2230,18 @@ class ConversationsPanel(wx.Panel):
         # own; playback must be started on the Tempo wrapper instead.
         self._audio_stream_duration = int(duration_seconds)
         self._current_audio_id = msg_id
+        self._audio_conv_jid   = (
+            self.conversation.get("remoteJid", "") if self.conversation else ""
+        )
         try:
             playback_ctrl = self._audio_tempo_ctrl if self._audio_tempo_ctrl is not None else self._audio_stream
+            # Restore saved position (e.g. when another audio preempted this one)
+            saved_pos = self._audio_positions.pop(msg_id, None)
+            if saved_pos:
+                try:
+                    playback_ctrl.set_position(saved_pos)
+                except Exception:
+                    pass
             playback_ctrl.play()
         except Exception:
             self._stop_audio()
@@ -2153,6 +2306,13 @@ class ConversationsPanel(wx.Panel):
         consecutive audio message if one exists immediately after in the list.
         Stops at the first non-audio (or separator) message.
         """
+        # Don't chain if the user has navigated to a different conversation —
+        # _sorted_messages belongs to the current conversation, not the one
+        # where the audio was playing.
+        current_jid = self.conversation.get("remoteJid", "") if self.conversation else ""
+        if current_jid != self._audio_conv_jid:
+            return
+
         # Find the index of the just-finished message
         current_idx = -1
         for i, msg in enumerate(self._sorted_messages):
@@ -2189,6 +2349,22 @@ class ConversationsPanel(wx.Panel):
         self._audio_speed_index = (self._audio_speed_index + 1) % len(
             self._audio_speed_steps
         )
+        self._apply_audio_speed()
+
+    def _on_audio_speed_decrease(self, event):
+        """Alt+, — step down one speed level (wraps at minimum)."""
+        if self._audio_speed_index > 0:
+            self._audio_speed_index -= 1
+            self._apply_audio_speed()
+
+    def _on_audio_speed_increase(self, event):
+        """Alt+. — step up one speed level (wraps at maximum)."""
+        if self._audio_speed_index < len(self._audio_speed_steps) - 1:
+            self._audio_speed_index += 1
+            self._apply_audio_speed()
+
+    def _apply_audio_speed(self):
+        """Apply the current speed index to the active stream and persist it."""
         speed = self._audio_speed_steps[self._audio_speed_index]
         self.audio_speed_btn.SetLabel(self._format_speed(speed))
         if self._audio_tempo_ctrl is not None:
@@ -2196,7 +2372,6 @@ class ConversationsPanel(wx.Panel):
                 self._audio_tempo_ctrl.tempo = self._audio_tempo_map[speed]
             except Exception:
                 pass
-        # Persist the new speed so it applies to all future playbacks/conversations
         self.main_window.settings.setdefault("audio_playback", {})["audio_default_speed"] = speed
         self.main_window.save_settings()
 
@@ -2445,6 +2620,9 @@ class ConversationsPanel(wx.Panel):
             """Return saved contact name for lj, trying @lid ↔ phone both ways,
             stripping Baileys device suffixes, then the chat 'name' as fallback."""
             lj_clean   = _strip_device(lj)
+            # Legacy @c.us JIDs: contacts and chats are stored under @s.whatsapp.net
+            if lj_clean.endswith("@c.us"):
+                lj_clean = lj_clean[:-5] + "@s.whatsapp.net"
             candidates = [lj_clean]
             if lj_clean != lj:
                 candidates.append(lj)  # also try original
@@ -2530,7 +2708,18 @@ class ConversationsPanel(wx.Panel):
         return ""
 
     def _get_context_info(self, msg) -> "dict | None":
-        """Extract contextInfo from wherever it sits in the message hierarchy."""
+        """Extract contextInfo from wherever it sits in the message hierarchy.
+
+        Evolution API's prepareMessage() merges extendedTextMessage.contextInfo
+        into the top-level 'contextInfo' field before erasing the sub-object,
+        so we check there first.  For audio/image/video replies the contextInfo
+        stays inside the respective sub-message type.
+        """
+        # Top-level contextInfo (Evolution API normalised text replies)
+        top_ctx = msg.get("contextInfo")
+        if isinstance(top_ctx, dict) and ("quotedMessage" in top_ctx or top_ctx.get("stanzaId")):
+            return top_ctx
+
         msg_obj = msg.get("message") or {}
         if not isinstance(msg_obj, dict):
             return None
@@ -2691,6 +2880,11 @@ class ConversationsPanel(wx.Panel):
         """
         Background: fetch contact profile / group info and update the
         conversation-data button note with a last-seen or group-size string.
+
+        For private chats the note comes from the _presence_cache (populated
+        by presence.update WebSocket events) rather than from fetchProfile,
+        because the Evolution API's fetchProfile response does not include
+        lastSeen or online fields.
         """
         jid      = conversation.get("remoteJid", "")
         mw       = self.main_window
@@ -2713,11 +2907,14 @@ class ConversationsPanel(wx.Panel):
                 size = data.get("size") or len(participants)
                 note = i18n.t("group_size").format(count=size)
             else:
-                # Private chat: fetch last-seen / online status from the API.
-                data      = mw.get_contact_profile(jid)
-                is_online = data.get("online", False)
-                last_seen = data.get("lastSeen")
-                if is_online:
+                # Private chat: resolve the canonical JID for cache lookup
+                canonical = mw._normalize_jid(jid)
+                if canonical.endswith("@lid"):
+                    canonical = getattr(mw, "_lid_to_phone", {}).get(canonical, canonical)
+                presence = getattr(mw, "_presence_cache", {}).get(canonical, {})
+                lkp      = presence.get("lastKnownPresence", "")
+                last_seen = presence.get("lastSeen")
+                if lkp in ("available", "composing", "recording"):
                     note = i18n.t("online_status")
                 elif last_seen:
                     ls_str = _fmt_last_seen(last_seen, i18n)
@@ -2736,6 +2933,43 @@ class ConversationsPanel(wx.Panel):
                     pass
 
         wx.CallAfter(_update)
+
+    def _refresh_presence_note(self, canonical_jid: str):
+        """
+        Called on the main thread by on_presence_update when a presence.update
+        arrives for the currently open conversation.  Updates the button note
+        immediately without going through the background-fetch path.
+        """
+        if self.conversation is None:
+            return
+        mw    = self.main_window
+        i18n  = mw.i18n
+        presence  = getattr(mw, "_presence_cache", {}).get(canonical_jid, {})
+        lkp       = presence.get("lastKnownPresence", "")
+        last_seen  = presence.get("lastSeen")
+
+        jid = self.conversation.get("remoteJid", "")
+        # Default note stays as the contact name
+        note = (
+            mw._resolve_contact_name(self.conversation)
+            or mw.find_name_through_messages(self.conversation)
+            or self.conversation.get("name", "")
+            or self.conversation.get("pushName", "")
+            or format_number(jid)
+        )
+
+        if lkp in ("available", "composing", "recording"):
+            note = i18n.t("online_status")
+        elif lkp == "unavailable" and last_seen:
+            ls_str = _fmt_last_seen(last_seen, i18n)
+            if ls_str:
+                note = ls_str
+
+        try:
+            self._conv_data_btn.SetNote(note)
+            self.conversation_panel.Layout()
+        except Exception:
+            pass
 
     # ── Conversation context menu handlers ───────────────────────────────────
 
@@ -3245,6 +3479,7 @@ class ConversationsPanel(wx.Panel):
         self.message_label.SetLabel(label)
         self._remove_quote_btn.Hide()
         self.conversation_panel.Layout()
+        self.message_field.SetFocus()
 
     # ── Accelerator shims ─────────────────────────────────────────────────────
 
@@ -3310,11 +3545,88 @@ class ConversationsPanel(wx.Panel):
 
     def _on_accel_delete_conv(self, event):
         """Delete (in chat list): delete the focused conversation."""
-        selected = self.conversations_list.GetFirstSelected()
-        if 0 <= selected < len(self.chats_list):
-            jid = self.chats_list[selected].get("remoteJid", "")
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
             if jid:
                 self._on_menu_delete_chat(jid)
+
+    def _selected_chat_from_list(self):
+        selected = self.conversations_list.GetFirstSelected()
+        if selected < 0:
+            selected = self.conversations_list.GetFocusedItem()
+        if 0 <= selected < len(self.chats_list):
+            return self.chats_list[selected]
+        return None
+
+    def _on_accel_conversation_data_list(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            self._show_conversation_data(chat=chat)
+
+    def _on_accel_toggle_read_list(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if int(chat.get("unreadCount") or 0) > 0:
+            self._on_menu_mark_read(jid)
+        else:
+            self._on_menu_mark_unread(jid)
+
+    def _on_accel_mute_list(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if self.main_window.is_chat_muted(jid):
+            self._on_menu_unmute(jid)
+        else:
+            self._on_menu_mute(jid, 28800)
+
+    def _on_accel_block_list(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid or jid.endswith("@g.us") or self.main_window._is_self_jid(jid):
+            return
+        self._on_menu_block(chat, jid)
+
+    def _on_accel_clear_list(self, event):
+        chat = self._selected_chat_from_list()
+        if chat:
+            jid = chat.get("remoteJid", "")
+            if jid:
+                self._on_menu_clear_chat(jid)
+
+    def _on_accel_archive_list(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if self.main_window.is_chat_archived(jid):
+            self._on_menu_unarchive(jid)
+        else:
+            self._on_menu_archive(jid)
+
+    def _on_accel_pin_list(self, event):
+        chat = self._selected_chat_from_list()
+        if not chat:
+            return
+        jid = chat.get("remoteJid", "")
+        if not jid:
+            return
+        if self.main_window.is_chat_pinned(jid):
+            self._on_menu_unpin(jid)
+        else:
+            self._on_menu_pin(jid)
 
     def _on_accel_copy_message(self, event):
         """Ctrl+C: copy focused message text to clipboard."""
@@ -3802,6 +4114,13 @@ class ConversationsPanel(wx.Panel):
             "messageTimestamp": int(time.time()),
             "pushName": "",
         }
+        if self._quoted_message:
+            _qk = self._quoted_message.get("key", {})
+            virtual_msg["contextInfo"] = {
+                "stanzaId":      _qk.get("id", ""),
+                "participant":   _qk.get("participant", ""),
+                "quotedMessage": self._quoted_message.get("message") or {},
+            }
         self._sorted_messages.append(virtual_msg)
         self.messages_list.Append((self._render_message_line(virtual_msg),))
         last = self.messages_list.GetItemCount() - 1
@@ -3914,6 +4233,13 @@ class ConversationsPanel(wx.Panel):
                 "messageTimestamp": int(time.time()),
                 "pushName": "",
             }
+            if quoted:
+                _qk = quoted.get("key", {})
+                virtual_msg["contextInfo"] = {
+                    "stanzaId":      _qk.get("id", ""),
+                    "participant":   _qk.get("participant", ""),
+                    "quotedMessage": quoted.get("message") or {},
+                }
             self._sorted_messages.append(virtual_msg)
             self.messages_list.Append((self._render_message_line(virtual_msg),))
             last = self.messages_list.GetItemCount() - 1
@@ -4000,39 +4326,47 @@ class ConversationsPanel(wx.Panel):
                 if existing.get("key", {}).get("id", "") == msg_id:
                     return
 
-        # Manage unread separator
-        if self._unread_sep_idx == -1:
-            # No separator yet — insert one before this new message
-            sep_pos = len(self._sorted_messages)
-            sep = {"_type": "unread_separator", "count": 1}
-            self._sorted_messages.insert(sep_pos, sep)
-            self.messages_list.InsertItem(sep_pos, self._render_separator(1))
-            self._unread_sep_idx = sep_pos
-            self._sep_from_open = False
-        elif self._sep_from_open:
-            # Separator was placed when the conversation was opened (old unread messages).
-            # Move it to just before this new message and reset the count to 1.
-            old_idx = self._unread_sep_idx
-            self._sorted_messages.pop(old_idx)
-            self.messages_list.DeleteItem(old_idx)
-            sep_pos = len(self._sorted_messages)
-            sep = {"_type": "unread_separator", "count": 1}
-            self._sorted_messages.insert(sep_pos, sep)
-            self.messages_list.InsertItem(sep_pos, self._render_separator(1))
-            self._unread_sep_idx = sep_pos
-            self._sep_from_open = False
-        else:
-            # Separator was placed by a previous live message — increment its count
-            sep = self._sorted_messages[self._unread_sep_idx]
-            sep["count"] = sep.get("count", 0) + 1
-            self.messages_list.SetItemText(
-                self._unread_sep_idx, self._render_separator(sep["count"])
-            )
+        # Batch all list operations so the screen reader receives a single
+        # accessibility event rather than one per insertion/update.
+        self.messages_list.Freeze()
+        try:
+            # Manage unread separator
+            if self._unread_sep_idx == -1:
+                # No separator yet — insert one before this new message
+                sep_pos = len(self._sorted_messages)
+                sep = {"_type": "unread_separator", "count": 1}
+                self._sorted_messages.insert(sep_pos, sep)
+                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                self._unread_sep_idx = sep_pos
+                self._sep_from_open = False
+            elif self._sep_from_open:
+                # Separator was placed when the conversation was opened (old
+                # unread messages). Move it just before this new message and
+                # reset the count to 1.
+                old_idx = self._unread_sep_idx
+                self._sorted_messages.pop(old_idx)
+                self.messages_list.DeleteItem(old_idx)
+                sep_pos = len(self._sorted_messages)
+                sep = {"_type": "unread_separator", "count": 1}
+                self._sorted_messages.insert(sep_pos, sep)
+                self.messages_list.InsertItem(sep_pos, self._render_separator(1))
+                self._unread_sep_idx = sep_pos
+                self._sep_from_open = False
+            else:
+                # Separator was placed by a previous live message — increment count
+                sep = self._sorted_messages[self._unread_sep_idx]
+                sep["count"] = sep.get("count", 0) + 1
+                self.messages_list.SetItemText(
+                    self._unread_sep_idx, self._render_separator(sep["count"])
+                )
 
-        # Append the real message (focus must NOT move)
-        self._sorted_messages.append(msg)
-        self.messages_list.Append((self._render_message_line(msg),))
-        # Scroll to the new message but keep keyboard focus where it is
+            # Append the real message (focus must NOT move)
+            self._sorted_messages.append(msg)
+            self.messages_list.Append((self._render_message_line(msg),))
+        finally:
+            self.messages_list.Thaw()
+
+        # Scroll to the new message after Thaw so the repaint is complete
         last = self.messages_list.GetItemCount() - 1
         if last >= 0:
             self.messages_list.EnsureVisible(last)
@@ -4073,6 +4407,24 @@ class ConversationsPanel(wx.Panel):
             )
         except Exception:
             messages_sorted = messages
+
+        # Deduplicate by key.id — records may accumulate duplicates when the
+        # same message arrives via both the initial sync and messages.upsert.
+        # Keep the last occurrence (latest version of the message wins).
+        _seen_ids: dict = {}
+        for i, m in enumerate(messages_sorted):
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("key", {}).get("id", "")
+            if mid:
+                _seen_ids[mid] = i
+        _kept = set(_seen_ids.values())
+        messages_sorted = [
+            m for i, m in enumerate(messages_sorted)
+            if isinstance(m, dict) and (
+                not m.get("key", {}).get("id", "") or i in _kept
+            )
+        ]
 
         # Build reaction map from all reaction messages
         for m in messages_sorted:

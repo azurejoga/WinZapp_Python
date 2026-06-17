@@ -127,6 +127,15 @@ class MessageQueue:
                         msg.fail_count = 0
                         with self._lock:
                             self._pending.pop(msg.local_id, None)
+                        # Register the real ID immediately so the WebSocket echo
+                        # (messages.upsert with fromMe=True) is recognised as
+                        # "sent by this instance" and not shown as a new message.
+                        if isinstance(real_id, str):
+                            own = self.main_window._own_sent_ids
+                            own.add(real_id)
+                            # Prevent unbounded growth — keep at most 500 IDs.
+                            if len(own) > 500:
+                                own.discard(next(iter(own)))
                         # Pass the real WhatsApp message ID so _mark_message_sent
                         # can update the virtual message's key.id for playback.
                         wx.CallAfter(

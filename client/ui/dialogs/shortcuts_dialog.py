@@ -90,6 +90,8 @@ class ShortcutsDialog(wx.Dialog):
             i18n.t("shortcut_ctrl_shift_e_label"),
             i18n.t("shortcut_ctrl_shift_r_label"),
             i18n.t("shortcut_ctrl_shift_p_label"),
+            i18n.t("shortcut_alt_comma_label"),
+            i18n.t("shortcut_alt_period_label"),
             i18n.t("shortcut_delete_label"),
             i18n.t("shortcut_ctrl_c_label"),
             i18n.t("shortcut_alt_c_label"),

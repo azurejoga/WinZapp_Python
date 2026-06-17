@@ -60,6 +60,9 @@ class ConversationDataDialog(wx.Dialog):
         self._jid    = jid
         self._name   = name
         self._is_group = jid.endswith("@g.us")
+        # Parallel list of participant JIDs, populated by _populate_group().
+        # Index matches the row index in _part_list.
+        self._participant_jids: list = []
 
         title_key  = "group_data" if self._is_group else "conversation_data"
         dlg_title  = f"{name} | {self._i18n.t(title_key)}"
@@ -138,6 +141,8 @@ class ConversationDataDialog(wx.Dialog):
         self._part_list.InsertColumn(0, self._i18n.t("conversations"), width=200)
         self._part_list.InsertColumn(1, self._i18n.t("phone_label"),   width=160)
         self._part_list.InsertColumn(2, self._i18n.t("group_admin"),   width=80)
+        self._part_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_participant_activated)
+        self._part_list.Bind(wx.EVT_KEY_DOWN, self._on_part_list_key_down)
         pt_sizer.Add(self._part_list, 1, wx.EXPAND | wx.ALL, 8)
         self._add_members_btn = wx.Button(part_page, label=self._i18n.t("add_member"))
         self._add_members_btn.Disable()   # enabled after we confirm user is admin
@@ -179,10 +184,12 @@ class ConversationDataDialog(wx.Dialog):
         # Resolve phone number: @lid JIDs are opaque device IDs, not phone
         # numbers — bridge them to the real phone JID via the reverse cache.
         jid = self._jid
+        lid_to_phone = getattr(self._mw, "_lid_to_phone", {})
         if jid.endswith("@lid"):
-            phone_jid = getattr(self._mw, "_lid_to_phone", {}).get(jid, "")
+            phone_jid = lid_to_phone.get(jid, "")
             if phone_jid:
                 jid = phone_jid
+        canonical = jid
         phone = format_number(jid) if not jid.endswith("@lid") else ""
 
         lines.append(f"{i18n.t('conversations')}: {name}")
@@ -194,6 +201,20 @@ class ConversationDataDialog(wx.Dialog):
         about = str(data.get("status") or "").strip()
         if about:
             lines.append(f"{i18n.t('about_label')}: {about}")
+
+        # Online / last-seen: read from the presence cache that is populated
+        # by presence.update WebSocket events.  The fetchProfile endpoint does
+        # not return these fields.
+        presence  = getattr(self._mw, "_presence_cache", {}).get(canonical, {})
+        lkp       = presence.get("lastKnownPresence", "")
+        last_seen = presence.get("lastSeen")
+        if lkp in ("available", "composing", "recording"):
+            lines.append(i18n.t("online_status"))
+        elif lkp == "unavailable" and last_seen:
+            from ui.conversations import _fmt_last_seen
+            ls_str = _fmt_last_seen(last_seen, i18n)
+            if ls_str:
+                lines.append(ls_str)
 
         self._info_ctrl.SetValue("\n".join(lines))
         self._info_ctrl.SetFocus()
@@ -223,9 +244,11 @@ class ConversationDataDialog(wx.Dialog):
 
         # ── Participants ──────────────────────────────────────────────────────
         self._part_list.DeleteAllItems()
+        self._participant_jids = []
         participants = data.get("participants", [])
         my_jid = getattr(self._mw, "my_jid", "") or ""
         user_is_admin = False
+        lid_to_phone  = getattr(self._mw, "_lid_to_phone", {})
         for p in participants:
             if not isinstance(p, dict):
                 continue
@@ -235,7 +258,7 @@ class ConversationDataDialog(wx.Dialog):
             # Also bridge @lid JIDs to phone-number JIDs via the reverse cache.
             contact = self._mw.contacts.get(p_jid)
             if not contact and p_jid.endswith("@lid"):
-                phone_jid = getattr(self._mw, "_lid_to_phone", {}).get(p_jid, "")
+                phone_jid = lid_to_phone.get(p_jid, "")
                 if phone_jid:
                     contact  = self._mw.contacts.get(phone_jid)
                     p_phone  = p_phone or format_number(phone_jid)
@@ -251,6 +274,9 @@ class ConversationDataDialog(wx.Dialog):
             self._part_list.InsertItem(idx, p_name)
             self._part_list.SetItem(idx, 1, p_phone)
             self._part_list.SetItem(idx, 2, is_admin)
+            # Store the best available JID for conversation navigation
+            resolved_jid = lid_to_phone.get(p_jid, p_jid) if p_jid.endswith("@lid") else p_jid
+            self._participant_jids.append(resolved_jid)
 
         # Enable "Add members" button only if current user is a group admin.
         # If we cannot determine my_jid, enable it anyway (API will reject if not admin).
@@ -291,3 +317,30 @@ class ConversationDataDialog(wx.Dialog):
         dlg = SelectGroupDialog(self._mw, self._jid, self._name)
         dlg.ShowModal()
         dlg.Destroy()
+
+    def _on_participant_activated(self, event):
+        """Enter / double-click on a participant row: open a private conversation."""
+        idx = event.GetIndex()
+        if idx < 0 or idx >= len(self._participant_jids):
+            return
+        jid = self._participant_jids[idx]
+        # Skip groups and @lid participants that could not be resolved to a phone.
+        if not jid or jid.endswith("@g.us") or jid.endswith("@lid"):
+            return
+        # Schedule navigation after the dialog closes so the main window is
+        # the active window when navigate_to_conversation_jid runs.
+        wx.CallAfter(self._mw.navigate_to_conversation_jid, jid)
+        self.EndModal(wx.ID_CANCEL)
+
+    def _on_part_list_key_down(self, event):
+        """Space on the participants list also activates the item (like Enter)."""
+        kc = event.GetKeyCode()
+        if kc == wx.WXK_SPACE:
+            idx = self._part_list.GetFocusedItem()
+            if idx >= 0:
+                self._part_list.Select(idx)
+                class _E:
+                    def GetIndex(self): return idx
+                self._on_participant_activated(_E())
+        else:
+            event.Skip()

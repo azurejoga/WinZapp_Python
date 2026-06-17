@@ -5,6 +5,7 @@ import shutil
 import socket as _socket
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import base64
 import socketio
@@ -115,8 +116,10 @@ class _HotkeyManager:
         msg = _MSG()
         while not self._stop.is_set():
             # MsgWaitForMultipleObjects with a 200 ms timeout so we can check _stop.
+            # 0x0088 = QS_HOTKEY | QS_POSTMESSAGE — wake up immediately when a
+            # WM_HOTKEY (posted message) arrives instead of waiting for the timeout.
             result = ctypes.windll.user32.MsgWaitForMultipleObjects(
-                0, None, False, 200, 0x0004  # QS_POSTMESSAGE
+                0, None, False, 200, 0x0088  # QS_HOTKEY | QS_POSTMESSAGE
             )
             if self._stop.is_set():
                 break
@@ -288,6 +291,10 @@ def _spawn_delevated(cmd: list, cwd: str, log_fh, main_window) -> bool:
         return False
 
 
+class MediaExpiredError(Exception):
+    """CDN URL for this media has expired (HTTP 403 or 410 from WhatsApp)."""
+
+
 class MainWindow(wx.Frame):
     def __init__(self):
         super().__init__(None)
@@ -349,14 +356,22 @@ class MainWindow(wx.Frame):
         self.evolution_process = None
         self.ensure_evolution_running()
 
-        # First-run dialog: ask about autostart (normal mode only, once ever)
+        # First-run dialogs: autostart and global hotkey (normal mode only, once ever)
         if not self.background_mode:
             self._check_first_run()
+            self._check_hotkey_first_run()
 
         self.offline_mode = False
         # True while the Baileys/WhatsApp WebSocket is connected; False after a
         # "Connection Closed" error. The MessageQueue checks this before sending.
         self._wa_connected = True
+        # IDs of messages sent by WinZapp itself (via MessageQueue).  Used by
+        # WebSocketClient.on_messages_upsert to distinguish "echo of our own
+        # send" (skip — already in UI) from "sent on another device" (show).
+        # Populated from the MessageQueue worker thread immediately after the
+        # API returns the real message ID, so it is always populated before the
+        # corresponding WebSocket echo event can be processed.
+        self._own_sent_ids: set = set()
         # Status text shown in the title bar and tray tooltip (e.g. "sincronizando")
         self._tray_status = ""
 
@@ -381,7 +396,17 @@ class MainWindow(wx.Frame):
         # Initialise outgoing-message queue (must exist before init_UI so the
         # ConversationsPanel can call self.main_window.message_queue.enqueue).
         self.message_queue = MessageQueue(self)
-        self.connect_websocket()
+        try:
+            self.connect_websocket()
+        except Exception:
+            self.error_sound.play()
+            wx.MessageBox(
+                self.i18n.t("websocket_failed_reconnect"),
+                self.i18n.t("connection_error"),
+                wx.OK | wx.ICON_WARNING,
+            )
+            self.connect.show_connection_dial()
+            self._just_paired = True
         self.init_UI()
 
 
@@ -744,8 +769,16 @@ class MainWindow(wx.Frame):
     # ── Navigate to conversation by JID ──────────────────────────────────────
 
     def navigate_to_conversation_jid(self, jid: str):
-        """Bring the window to front and open the conversation matching jid."""
-        self.restore_window()
+        """Bring the window to front and open the conversation matching jid.
+
+        Only calls restore_window() when the window is actually hidden; if it
+        is already visible the caller (e.g. _do_open) has already restored it
+        and a second SetForegroundWindow call would steal focus at an unexpected
+        moment (e.g. the user has already moved to another app after clicking
+        the toast).
+        """
+        if self._window_hidden:
+            self.restore_window()
         if hasattr(self, "conversations_panel"):
             self.conversations_panel.navigate_to_jid(jid)
 
@@ -777,6 +810,13 @@ class MainWindow(wx.Frame):
         # Statuses (stories) arrive as messages on status@broadcast; they are
         # handled by the Status tab, not as a conversation.
         if remote_jid.endswith("@broadcast"):
+            return
+
+        # Reaction messages only update the live display of an existing message;
+        # they must not be added to records, unread counts, or notifications.
+        if msg.get("messageType") == "reactionMessage":
+            if hasattr(self, "conversations_panel"):
+                self.conversations_panel.on_incoming_message(remote_jid, msg)
             return
 
         # ── Resolve canonical JID, merging @lid duplicates ───────────────────
@@ -1118,9 +1158,8 @@ class MainWindow(wx.Frame):
             self._evolution_log_path = resource_path("api", "evolution.log")
             log_fh = open(self._evolution_log_path, "w",
                           encoding="utf-8", errors="replace")
-            self._evolution_log_fh   = log_fh
-            cwd                      = resource_path("api")
-            self.evolution_process   = None
+            cwd                    = resource_path("api")
+            self.evolution_process = None
 
             spawned = False
             if _is_elevated():
@@ -1134,21 +1173,21 @@ class MainWindow(wx.Frame):
                     stdout=log_fh,
                     stderr=log_fh,
                 )
+            # Release Python's file handle now that node.exe has inherited it.
+            # This avoids a double-lock on evolution.log so an update extraction
+            # can overwrite the file once WinZapp exits (only node.exe holds a
+            # lock while it is running — we don't need it on the Python side).
+            log_fh.close()
+            self._evolution_log_fh = None
             atexit.register(self._stop_evolution)
         except Exception:
             pass
 
     def _stop_evolution(self):
-        """Terminate the Evolution API process and close the log file."""
+        """Terminate the Evolution API process."""
         if self.evolution_process and self.evolution_process.poll() is None:
             try:
                 self.evolution_process.terminate()
-            except Exception:
-                pass
-        log_fh = getattr(self, "_evolution_log_fh", None)
-        if log_fh:
-            try:
-                log_fh.close()
             except Exception:
                 pass
 
@@ -1350,6 +1389,73 @@ class MainWindow(wx.Frame):
             self.settings.setdefault("general", {})["autostart"] = False
             self.save_settings()
 
+    def _check_hotkey_first_run(self):
+        """
+        Show a one-time dialog offering the user a global hotkey to open WinZapp
+        from any application.  Guards on ``hotkey_first_run_asked`` so it only
+        shows once per installation, right after the autostart prompt.
+
+        The chosen (vk, mod) pair is written to settings immediately; the
+        _HotkeyManager is created later in init_UI via _apply_global_hotkey().
+        """
+        gen = self.settings.get("general", {})
+        if gen.get("hotkey_first_run_asked", False):
+            return
+        # Already has a hotkey configured — mark done without asking again.
+        if gen.get("global_hotkey"):
+            self.settings.setdefault("general", {})["hotkey_first_run_asked"] = True
+            self.save_settings()
+            return
+
+        self.settings.setdefault("general", {})["hotkey_first_run_asked"] = True
+        self.save_settings()
+
+        from ui.dialogs.settings_dialog import _HotkeyCapture
+
+        dlg = wx.Dialog(
+            None,
+            title=self.i18n.t("hotkey_first_run_title"),
+            style=wx.DEFAULT_DIALOG_STYLE,
+        )
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        msg_ctrl = wx.StaticText(dlg, label=self.i18n.t("hotkey_first_run_message"))
+        msg_ctrl.Wrap(480)
+        sizer.Add(msg_ctrl, 0, wx.ALL, 15)
+
+        capture = _HotkeyCapture(
+            dlg,
+            accessible_name=self.i18n.t("global_hotkey_label"),
+        )
+        capture.SetHint(self.i18n.t("global_hotkey_hint"))
+        sizer.Add(capture, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
+
+        btn_sizer = wx.StdDialogButtonSizer()
+        ok_btn   = wx.Button(dlg, wx.ID_OK,     self.i18n.t("ok"))
+        skip_btn = wx.Button(dlg, wx.ID_CANCEL, self.i18n.t("hotkey_first_run_skip"))
+        btn_sizer.AddButton(ok_btn)
+        btn_sizer.AddButton(skip_btn)
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+
+        dlg.SetSizer(sizer)
+        sizer.Fit(dlg)
+        dlg.CenterOnScreen()
+
+        result = dlg.ShowModal()
+        vk  = capture._vk
+        mod = capture._mod
+        dlg.Destroy()
+
+        if result == wx.ID_OK and vk:
+            self.settings.setdefault("general", {})["global_hotkey"] = {"vk": vk, "mod": mod}
+            self.save_settings()
+            wx.MessageBox(
+                self.i18n.t("hotkey_first_run_success").format(hotkey=_vk_mod_to_str(vk, mod)),
+                self.i18n.t("autostart_success_title"),
+                wx.OK | wx.ICON_INFORMATION,
+            )
+
     def _apply_autostart(self, enable: bool):
         """
         Enable or disable the Windows Run registry entry for WinZapp.
@@ -1543,6 +1649,8 @@ class MainWindow(wx.Frame):
 
     def prepare_sync(self):
         os.makedirs(data_path(), exist_ok=True)
+        self._media_failed_lock = threading.Lock()
+        self._media_failed_ids  = self._load_media_failed_ids()
         self.generate_secret_key()
         self.key = self.retrieve_secret_key()
         self.create_basic_files()
@@ -1871,17 +1979,17 @@ class MainWindow(wx.Frame):
             compare = getattr(self, "_lid_to_phone", {}).get(jid, jid)
         return compare.split("@")[0] == my_jid.split("@")[0]
 
-    def set_chats(self):
-        self._build_lid_to_phone_cache()
+    def _compute_chat_lists(self):
+        """Compute sorted/filtered chat lists. Safe to run on a background thread."""
         deleted  = set(self.settings.get("deleted_chats",  []))
         archived = set(self.settings.get("archived_chats", []))
         pinned   = set(self.settings.get("pinned_chats",   []))
+        my_jid   = getattr(self, "my_jid", "")
 
         main_chats, main_names = [], []
         arch_chats, arch_names = [], []
 
-        my_jid = getattr(self, "my_jid", "")
-        for jid, chat in self.chats.items():
+        for jid, chat in list(self.chats.items()):
             if jid in deleted:
                 continue
             name = (
@@ -1892,8 +2000,6 @@ class MainWindow(wx.Frame):
                 or self.find_jid_through_messages(chat)
                 or (format_number(jid) if not jid.endswith("@lid") else "")
             )
-            # Detect self-chat (user messaging their own number).
-            # Bridge @lid before comparing so self-chats returned as @lid are caught.
             if my_jid and not jid.endswith("@g.us") and self._is_self_jid(jid):
                 name = self.i18n.t("self_chat_name")
             if jid in archived:
@@ -1905,28 +2011,31 @@ class MainWindow(wx.Frame):
 
         # Pinned chats float to the top; within each group sort by most-recent
         # message timestamp descending (newest first), then alphabetically.
-        def _chat_last_ts(chat):
+        def _chat_last_ts(c):
             ts = 0
-            for msg in chat.get("messages", {}).get("messages", {}).get("records", []):
-                t = int(msg.get("messageTimestamp", 0) or 0)
+            for m in c.get("messages", {}).get("messages", {}).get("records", []):
+                t = int(m.get("messageTimestamp", 0) or 0)
                 if t > ts:
                     ts = t
             return ts
 
         def _sort_key(pair):
-            chat, name = pair
-            jid = chat.get("remoteJid", "")
-            pin = 0 if jid in pinned else 1
-            return (pin, -_chat_last_ts(chat), name.lower())
+            c, n = pair
+            j   = c.get("remoteJid", "")
+            pin = 0 if j in pinned else 1
+            return (pin, -_chat_last_ts(c), n.lower())
 
         pairs = sorted(zip(main_chats, main_names), key=_sort_key)
         main_chats = [c for c, _ in pairs]
         main_names = [n for _, n in pairs]
+        return main_chats, main_names, arch_chats, arch_names
 
+    def _apply_chat_lists(self, main_chats, main_names, arch_chats, arch_names):
+        """Apply sorted chat lists to panels and refresh UI. Must run on main thread."""
         self.chat_names = main_names
         # _all_chats_list / _all_chat_names always hold the full sorted list.
-        # add_chats_to_ui() reads these to apply the search filter, then
-        # writes back to chats_list / chat_names so indices stay consistent.
+        # add_chats_to_ui() reads these to apply search / filter, then writes
+        # back to chats_list / chat_names so indices stay consistent.
         self.conversations_panel._all_chats_list = main_chats
         self.conversations_panel._all_chat_names = main_names
         self.conversations_panel.chats_list = main_chats
@@ -1948,6 +2057,10 @@ class MainWindow(wx.Frame):
         if getattr(self, "tray_icon", None) is not None and self._window_hidden:
             self.tray_icon.update_tooltip()
 
+    def set_chats(self):
+        self._build_lid_to_phone_cache()
+        self._apply_chat_lists(*self._compute_chat_lists())
+
     def _schedule_set_chats(self):
         """Debounce set_chats() so rapid message bursts trigger only one rebuild.
         Safe to call from any thread; scheduling happens on the wx main thread."""
@@ -1957,8 +2070,16 @@ class MainWindow(wx.Frame):
         wx.CallLater(300, self._do_scheduled_set_chats)
 
     def _do_scheduled_set_chats(self):
+        """Run heavy computation in background; apply UI changes on main thread."""
         self._set_chats_pending = False
-        self.set_chats()
+        def _bg():
+            try:
+                self._build_lid_to_phone_cache()
+                result = self._compute_chat_lists()
+                wx.CallAfter(self._apply_chat_lists, *result)
+            except Exception as e:
+                print(f"[_do_scheduled_set_chats] error: {e}")
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _build_lid_to_phone_cache(self):
         """
@@ -1992,6 +2113,13 @@ class MainWindow(wx.Frame):
 
         self._lid_to_phone  = cache
         self._phone_to_lid  = {v: k for k, v in cache.items()}
+        # Presence cache: maps JID → {lastKnownPresence, lastSeen}
+        # Populated by WebSocketClient.on_presence_update via wx.CallAfter.
+        if not hasattr(self, "_presence_cache"):
+            self._presence_cache = {}
+        # Maps chat JID → set of participant JIDs currently composing
+        if not hasattr(self, "_composing_chats"):
+            self._composing_chats = {}
 
     def _find_alt_jid_from_messages(self, chat):
         """
@@ -2125,8 +2253,28 @@ class MainWindow(wx.Frame):
                 print(f"[sync_remote_chats] failed to sync {jid}, continuing")
 
     def sync_media_for_all_chats(self):
-        for chat in self.chats.values():
-            self.sync_chat_media(chat)
+        _MEDIA_TYPES = {"audioMessage", "documentMessage", "imageMessage",
+                        "stickerMessage", "videoMessage"}
+        tasks = [
+            msg
+            for chat in self.chats.values()
+            for msg in chat.get("messages", {}).get("messages", {}).get("records", [])
+            if msg.get("messageType") in _MEDIA_TYPES
+        ]
+        if not tasks:
+            return
+
+        timeout = self._MEDIA_SYNC_TIMEOUT
+        with ThreadPoolExecutor(max_workers=self._MEDIA_SYNC_WORKERS) as pool:
+            futs = {pool.submit(self.sync_if_media, msg, timeout): msg for msg in tasks}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception:
+                    pass
+
+        # Persist the set of expired IDs accumulated during this sync run.
+        self._save_media_failed_ids()
 
     def sync_chat_media(self, chat):
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
@@ -2213,33 +2361,62 @@ class MainWindow(wx.Frame):
     # to download older media causes the Evolution API to enter a 5-second retry
     # loop for every expired URL, which starves the API thread pool and eventually
     # breaks sends.  Never request media older than this threshold.
-    _MEDIA_MAX_AGE_SECONDS = 75 * 24 * 3600  # 75 days — safely inside the 90-day TTL
+    _MEDIA_MAX_AGE_SECONDS = 14 * 24 * 3600  # 14 days — WhatsApp CDN typical TTL
+    _MEDIA_SYNC_WORKERS    = 6               # parallel workers during bulk sync
+    _MEDIA_SYNC_TIMEOUT    = 20              # seconds per request during bulk sync
 
-    def sync_if_media(self, msg):
+    def _load_media_failed_ids(self) -> set:
+        """Load the set of message IDs whose media CDN URL has previously expired."""
+        try:
+            with open(data_path("media_failed.json"), "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+
+    def _save_media_failed_ids(self):
+        """Persist the failed-media set so expired IDs are skipped on future launches."""
+        with self._media_failed_lock:
+            try:
+                with open(data_path("media_failed.json"), "w", encoding="utf-8") as f:
+                    json.dump(list(self._media_failed_ids), f)
+            except Exception:
+                pass
+
+    def sync_if_media(self, msg, timeout=60):
         """Download media for a single message during the background sync phase."""
         message_type = msg.get("messageType", "")
         _MEDIA_TYPES = {"documentMessage", "imageMessage", "stickerMessage", "videoMessage"}
+        if message_type not in _MEDIA_TYPES and message_type != "audioMessage":
+            return
 
-        # Skip media whose CDN URL has likely expired.
-        import time as _time
+        # Skip messages older than the CDN TTL — URLs have certainly expired.
         ts = int(msg.get("messageTimestamp", 0) or 0)
-        if ts and (_time.time() - ts) > self._MEDIA_MAX_AGE_SECONDS:
+        if ts and (time.time() - ts) > self._MEDIA_MAX_AGE_SECONDS:
+            return
+
+        msg_id = msg.get("key", {}).get("id", "")
+
+        # Skip IDs that previously returned 403/410 (expired CDN URL).
+        if msg_id and msg_id in self._media_failed_ids:
             return
 
         try:
             if message_type == "audioMessage":
-                self.handle_audio_message(msg)
-            elif message_type in _MEDIA_TYPES:
-                msg_id = msg.get("key", {}).get("id", "")
+                self.handle_audio_message(msg, timeout=timeout)
+            else:
                 conv = self.conversations_panel
                 def _prog(p, mid=msg_id):
                     wx.CallAfter(conv.update_message_download_progress, mid, p)
-                self.handle_media_message(msg, progress_callback=_prog)
-                wx.CallAfter(conv.update_message_download_progress, msg_id, 1.0)
+                self.handle_media_message(msg, progress_callback=_prog, timeout=timeout)
+                if msg_id:
+                    wx.CallAfter(conv.update_message_download_progress, msg_id, 1.0)
+        except MediaExpiredError:
+            if msg_id:
+                self._media_failed_ids.add(msg_id)
         except Exception:
             pass
 
-    def handle_media_message(self, msg, progress_callback=None):
+    def handle_media_message(self, msg, progress_callback=None, timeout=60):
         """Download and encrypt a document/image/sticker/video to data/media/."""
         msg_id = msg.get("key", {}).get("id", "")
         if not msg_id:
@@ -2247,7 +2424,8 @@ class MainWindow(wx.Frame):
         media_path = data_path("media", f"{msg_id}.wzmedia")
         if os.path.isfile(media_path):
             return
-        b64 = self.get_base64_from_media(msg, progress_callback=progress_callback)
+        b64 = self.get_base64_from_media(msg, progress_callback=progress_callback,
+                                         timeout=timeout)
         if not b64:
             return
         content = base64.b64decode(b64)
@@ -2255,41 +2433,43 @@ class MainWindow(wx.Frame):
         with open(media_path, "wb") as f:
             f.write(encrypted)
 
-    @staticmethod
-    def _clean_quoted(quoted: dict) -> dict:
-        """Return a minimal quoted dict with only the fields the Evolution API DTO
-        expects: ``key`` (with id, remoteJid, fromMe) and ``message``.
-        Extra Evolution-specific fields (instanceId, source, messageType, …) are
-        stripped so they don't confuse the API schema validator or Baileys.
+    def _clean_quoted(self, quoted: dict) -> dict:
+        """Return a minimal quoted dict the Evolution API DTO accepts.
+
+        Only ``key`` is sent.  The Evolution API will fetch the full message
+        content from its internal Baileys message store using
+        ``getMessage(key, true)``.  This avoids serialising binary fields
+        (``jpegThumbnail``, ``mediaKey``, ``fileEncSha256``, …) that arrive
+        from Socket.IO as Python ``bytes`` objects and cannot be JSON-encoded.
+
+        JIDs are normalised before sending:
+          - @c.us  → @s.whatsapp.net  (legacy format)
+          - @lid   → @s.whatsapp.net  when the reverse cache knows the mapping
         """
         if not quoted or not isinstance(quoted, dict):
             return None
         key_raw = quoted.get("key")
-        message  = quoted.get("message")
         if not key_raw or not isinstance(key_raw, dict):
             return None
         _ALLOWED = {"id", "remoteJid", "fromMe", "participant"}
         clean_key = {k: v for k, v in key_raw.items() if k in _ALLOWED}
         if not clean_key.get("id"):
             return None
-        result = {"key": clean_key}
-        if message and isinstance(message, dict):
-            # Flatten extendedTextMessage (reply-of-reply) to plain conversation so
-            # Baileys doesn't receive a nested contextInfo inside the quoted preview.
-            if "extendedTextMessage" in message:
-                text = (message["extendedTextMessage"] or {}).get("text", "")
-                if text:
-                    result["message"] = {"conversation": text}
-            else:
-                # Strip contextInfo from media message types to avoid chaining.
-                clean_msg = {}
-                for mtype, mcontent in message.items():
-                    if isinstance(mcontent, dict):
-                        clean_msg[mtype] = {k: v for k, v in mcontent.items() if k != "contextInfo"}
-                    else:
-                        clean_msg[mtype] = mcontent
-                result["message"] = clean_msg
-        return result
+
+        # Normalise JIDs so the API always receives @s.whatsapp.net format.
+        lid_to_phone = getattr(self, "_lid_to_phone", {})
+        for field in ("remoteJid", "participant"):
+            jid = clean_key.get(field, "")
+            if not jid:
+                continue
+            jid = self._normalize_jid(jid)          # @c.us → @s.whatsapp.net
+            if jid.endswith("@lid"):
+                phone = lid_to_phone.get(jid, "")
+                if phone:
+                    jid = phone
+            clean_key[field] = jid
+
+        return {"key": clean_key}
 
     def _check_wa_connection_closed(self, response):
         """If the Evolution API returned a 'Connection Closed' error, mark the
@@ -2379,11 +2559,25 @@ class MainWindow(wx.Frame):
             f"/message/sendReaction/{self.token}"
         )
         headers = {"apikey": self.token, "Content-Type": "application/json"}
-        payload = {"key": msg_key, "reaction": emoji}
+        # Send only the standard WhatsApp key fields so no extra fields from
+        # prepareMessage (e.g. remoteJidAlt, addressingMode) confuse the API.
+        clean_key: dict = {
+            "id":        msg_key.get("id", ""),
+            "remoteJid": msg_key.get("remoteJid", ""),
+            "fromMe":    bool(msg_key.get("fromMe", False)),
+        }
+        participant = msg_key.get("participant")
+        if participant:
+            clean_key["participant"] = participant
+        payload = {"key": clean_key, "reaction": emoji}
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=15)
-            return response.status_code in (200, 201)
-        except Exception:
+            if response.status_code not in (200, 201):
+                print(f"[send_reaction] HTTP {response.status_code}: {response.text[:500]}")
+                return False
+            return True
+        except Exception as exc:
+            print(f"[send_reaction] exception: {exc}")
             return False
 
     def _on_message_sent(self, local_id: str, audio_path: str = None, real_id: str = None):
@@ -2437,23 +2631,127 @@ class MainWindow(wx.Frame):
         if hasattr(self, "conversations_panel"):
             self.conversations_panel.refresh_message_status(msg_id, status)
 
-    def handle_audio_message(self, msg):
-        #First, check if the audio is already downloaded
+    def _resolve_jid_name(self, jid_norm: str) -> str:
+        """Return the best display name for a participant JID (contact lookup + fallback)."""
+        contact = self.contacts.get(jid_norm)
+        if contact:
+            name = (contact.get("name") or contact.get("pushName") or "").strip()
+            if name and not name.isdigit():
+                return name
+        chat = self.chats.get(jid_norm)
+        if chat:
+            name = (chat.get("name") or chat.get("pushName") or "").strip()
+            if name and not name.isdigit():
+                return name
+        if not jid_norm.endswith(("@g.us", "@lid")):
+            return format_number(jid_norm)
+        return jid_norm.split("@")[0]
+
+    def on_presence_update(self, jid: str, presences: dict):
+        """
+        Handle a presence.update WebSocket event (main thread).
+
+        Stores the latest presence data for the JID in _presence_cache, updates
+        the composing-chats index for the typing indicator in the chat list, speaks
+        via AO2 when the active conversation has a new composing event, and refreshes
+        the data-button note for the open conversation.
+
+        presences: {jid_str: {"lastKnownPresence": str, "lastSeen": int|None}, ...}
+        """
+        if not jid or not isinstance(presences, dict):
+            return
+
+        chat_jid_norm = self._normalize_jid(jid)
+
+        composing_chats = getattr(self, "_composing_chats", None)
+        if composing_chats is None:
+            self._composing_chats = {}
+            composing_chats = self._composing_chats
+
+        # Determine the open conversation JID (may be None)
+        panel     = getattr(self, "conversations_panel", None)
+        conv      = getattr(panel, "conversation", None) if panel else None
+        conv_jid  = ""
+        if conv is not None:
+            conv_jid = self._normalize_jid(conv.get("remoteJid", ""))
+            if conv_jid.endswith("@lid"):
+                conv_jid = self._lid_to_phone.get(conv_jid, conv_jid)
+
+        presence_changed = False
+
+        for participant_jid, data in presences.items():
+            if not isinstance(data, dict):
+                continue
+            canonical = self._normalize_jid(participant_jid)
+            if canonical.endswith("@lid"):
+                canonical = self._lid_to_phone.get(canonical, canonical)
+
+            old_lkp = self._presence_cache.get(canonical, {}).get("lastKnownPresence", "")
+            new_lkp = data.get("lastKnownPresence", "unavailable")
+
+            self._presence_cache[canonical] = {
+                "lastKnownPresence": new_lkp,
+                "lastSeen": data.get("lastSeen"),
+            }
+
+            if new_lkp != old_lkp:
+                presence_changed = True
+
+            # Update composing index for this chat
+            if chat_jid_norm not in composing_chats:
+                composing_chats[chat_jid_norm] = set()
+            if new_lkp == "composing":
+                composing_chats[chat_jid_norm].add(canonical)
+            else:
+                composing_chats[chat_jid_norm].discard(canonical)
+
+            # Speak via AO2 when a new composing event starts in the active conversation
+            if new_lkp == "composing" and old_lkp != "composing" and chat_jid_norm == conv_jid:
+                name = self._resolve_jid_name(canonical)
+                if name:
+                    try:
+                        self.speak_output.output(self.i18n.t("typing_text").format(name=name))
+                    except Exception:
+                        pass
+
+        # Refresh the chat list when any presence state changed (debounced)
+        if presence_changed:
+            self._schedule_set_chats()
+
+        # Refresh the data-button note for the open conversation
+        if panel is None or conv is None:
+            return
+        if conv_jid in self._presence_cache:
+            panel._refresh_presence_note(conv_jid)
+
+    def on_chat_unread_update(self, jid: str, unread_count: int):
+        """Handle unread-count change from chats.update (e.g. read on another device)."""
+        normalized = self._normalize_jid(jid)
+        chat = self.chats.get(normalized)
+        if chat is None:
+            return
+        old_count = int(chat.get("unreadCount") or 0)
+        if old_count == unread_count:
+            return
+        chat["unreadCount"] = unread_count
+        self._schedule_set_chats()
+
+    def handle_audio_message(self, msg, timeout=60):
         voice_messages_dir = data_path("voice_messages")
         audio_file_path = os.path.join(voice_messages_dir, f"{msg.get('key', {}).get('id', '')}.msv")
         if os.path.isfile(audio_file_path):
             return
-
-        base64_audio = self.get_base64_from_media(msg)
+        base64_audio = self.get_base64_from_media(msg, timeout=timeout)
         if not base64_audio:
             return
         audio_content = base64.b64decode(base64_audio)
         self.save_audio_locally(msg, audio_content)
 
-    def get_base64_from_media(self, media, progress_callback=None):
+    def get_base64_from_media(self, media, progress_callback=None, timeout=60):
         """
         Fetch encrypted media from Evolution API and return its base64 string.
 
+        Raises MediaExpiredError when the WhatsApp CDN URL has expired (HTTP 403/410).
         When *progress_callback* is provided the request is streamed and the
         callback is called with a float in [0, 1] as each chunk arrives.
         """
@@ -2472,14 +2770,19 @@ class MainWindow(wx.Frame):
         headers = {"apikey": self.token, "Content-Type": "application/json"}
 
         if progress_callback is None:
-            response = requests.post(url, json=payload, headers=headers, timeout=60)
+            response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if response.status_code in (403, 410):
+                raise MediaExpiredError(response.status_code)
             if response.status_code in (200, 201):
                 return response.json().get("base64", "")
             return ""
 
         # Streaming mode so we can report per-chunk progress
         try:
-            response = requests.post(url, json=payload, headers=headers, stream=True, timeout=60)
+            response = requests.post(url, json=payload, headers=headers,
+                                     stream=True, timeout=timeout)
+            if response.status_code in (403, 410):
+                raise MediaExpiredError(response.status_code)
             if response.status_code not in (200, 201):
                 return ""
             total = int(response.headers.get("content-length", 0))
@@ -2493,6 +2796,8 @@ class MainWindow(wx.Frame):
                         progress_callback(downloaded / total)
             body = b"".join(chunks).decode("utf-8", errors="replace")
             return json.loads(body).get("base64", "")
+        except MediaExpiredError:
+            raise
         except Exception:
             return ""
 
@@ -2513,12 +2818,19 @@ class MainWindow(wx.Frame):
         Evolution API v2 expects POST /chat/markMessageAsRead with
         {"readMessages": [{"remoteJid", "fromMe", "id"}]} where "id" must be
         a real message ID; we send the key of the newest incoming message.
+        The Evolution API then calls both Baileys readMessages (sends individual
+        read receipts) and chatModify(markRead=true) for proper multi-device sync.
         """
         chat = self.chats.get(remote_jid)
         if chat is None:
             return
+
+        unread = int(chat.get("unreadCount") or 0)
         chat["unreadCount"] = 0
         wx.CallAfter(self.set_chats)
+
+        if unread == 0:
+            return  # nothing to mark as read on the server
 
         records = chat.get("messages", {}).get("messages", {}).get("records", [])
         latest = max(
@@ -2528,8 +2840,27 @@ class MainWindow(wx.Frame):
             default=None,
         )
         if latest is None:
+            # Fallback: use the chat-level lastMessage stored by findChats
+            lm = chat.get("lastMessage", {})
+            if (lm and isinstance(lm, dict)
+                    and lm.get("key", {}).get("id")
+                    and not lm.get("key", {}).get("fromMe")):
+                latest = lm
+
+        if latest is None:
+            print(f"[mark_as_read] No incoming message found for {remote_jid}, skipping API call")
             return
+
         key = latest.get("key", {})
+        msg_key = {
+            "remoteJid": remote_jid,
+            "fromMe":    False,
+            "id":        key.get("id", ""),
+        }
+        # Include participant for group chats so Evolution API can forward it
+        # to Baileys readMessages/chatModify with the correct sender context.
+        if key.get("participant"):
+            msg_key["participant"] = key["participant"]
 
         url = (
             f"{self.evolution_server}:{self.evolution_port}"
@@ -2537,18 +2868,16 @@ class MainWindow(wx.Frame):
         )
         headers = {"apikey": self.token, "Content-Type": "application/json"}
         try:
-            requests.post(
+            resp = requests.post(
                 url,
-                json={"readMessages": [{
-                    "remoteJid": key.get("remoteJid") or remote_jid,
-                    "fromMe":    False,
-                    "id":        key.get("id", ""),
-                }]},
+                json={"readMessages": [msg_key]},
                 headers=headers,
                 timeout=10,
             )
-        except Exception:
-            pass
+            if not resp.ok:
+                print(f"[mark_as_read] API error {resp.status_code} for {remote_jid}: {resp.text[:200]}")
+        except Exception as exc:
+            print(f"[mark_as_read] Request failed for {remote_jid}: {exc}")
 
     def mark_conversation_as_unread(self, remote_jid: str):
         chat = self.chats.get(remote_jid)
@@ -2649,6 +2978,7 @@ class MainWindow(wx.Frame):
             lst.append(jid)
         self.save_settings()
         wx.CallAfter(self.set_chats)
+        self._api_archive_chat(jid, archive=True)
 
     def unarchive_chat(self, jid: str):
         lst = self.settings.setdefault("archived_chats", [])
@@ -2656,6 +2986,23 @@ class MainWindow(wx.Frame):
             lst.remove(jid)
         self.save_settings()
         wx.CallAfter(self.set_chats)
+        self._api_archive_chat(jid, archive=False)
+
+    def _api_archive_chat(self, jid: str, archive: bool):
+        url = (f"{self.evolution_server}:{self.evolution_port}"
+               f"/chat/archiveChat/{self.token}")
+        headers = {"apikey": self.token, "Content-Type": "application/json"}
+        try:
+            resp = requests.post(
+                url,
+                json={"chat": jid, "archive": archive},
+                headers=headers,
+                timeout=10,
+            )
+            if not resp.ok:
+                print(f"[archive_chat] API error {resp.status_code} for {jid}: {resp.text[:200]}")
+        except Exception as exc:
+            print(f"[archive_chat] Request failed for {jid}: {exc}")
 
     # ── Delete / Clear ────────────────────────────────────────────────────────
 
@@ -2891,7 +3238,7 @@ class MainWindow(wx.Frame):
             if phone_jid:
                 contact = self.contacts.get(phone_jid)
         if contact:
-            name = contact.get("pushName") or ""
+            name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):
                 return name
         if jid.endswith("@lid"):
@@ -2981,8 +3328,8 @@ class MainWindow(wx.Frame):
                 sender_jid = p_key.get("participant", "") or p_key.get("remoteJid", "")
                 push       = last.get("pushName", "")
                 sender_name = (
-                    (push if push and not is_phone_like(push) else "")
-                    or self._resolve_contact_name({"remoteJid": sender_jid})
+                    self._resolve_contact_name({"remoteJid": sender_jid})
+                    or (push if push and not is_phone_like(push) else "")
                     or self._preview_sender_from_jid(sender_jid)
                 )
                 label = i18n.t("reaction_preview_them").format(name=sender_name, emoji=emoji)
@@ -3060,8 +3407,8 @@ class MainWindow(wx.Frame):
             sender_jid = p_key.get("participant") or p_key.get("remoteJid", "")
             push       = last.get("pushName", "")
             sender_name = (
-                (push if push and not is_phone_like(push) else "")
-                or self._resolve_contact_name({"remoteJid": sender_jid})
+                self._resolve_contact_name({"remoteJid": sender_jid})
+                or (push if push and not is_phone_like(push) else "")
                 or self._preview_sender_from_jid(sender_jid)
             )
             sender_prefix = f"{sender_name}: " if sender_name else ""
@@ -3075,12 +3422,13 @@ class MainWindow(wx.Frame):
     def add_chats_to_ui(self):
         """Rebuild the conversations list from the current chats data.
 
-        Applies the active search filter to both the wx.ListCtrl *and* the
-        backing chats_list/chat_names arrays so that list indices are always
-        consistent.  Without this sync the user would open the wrong
+        Applies active search and conversation filter to both the wx.ListCtrl
+        and the backing chats_list/chat_names arrays so that list indices are
+        always consistent.  Without this sync the user would open the wrong
         conversation when a search was active.
         """
-        search = self.conversations_panel.search_field.GetValue().strip().lower()
+        search       = self.conversations_panel.search_field.GetValue().strip().lower()
+        conv_filter  = getattr(self.conversations_panel, '_conv_filter', 'all')
 
         # Always start from the full sorted lists saved by set_chats() so
         # that restoring the window or clearing a search shows all chats.
@@ -3092,26 +3440,44 @@ class MainWindow(wx.Frame):
         displayed_chats: list = []
         displayed_names: list = []
 
-        self.conversations_panel.conversations_list.DeleteAllItems()
-        for i, chat in enumerate(full_chats):
-            name = full_names[i]
-            if search and search not in name.lower():
-                continue
-            unread = int(chat.get("unreadCount") or 0)
-            if unread > 0:
-                unread_str = (
-                    f" {unread} "
-                    + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
-                )
-            else:
-                unread_str = ""
-            preview = self._last_msg_preview(chat)
-            item_text = name + unread_str
-            if preview:
-                item_text += f" {preview}"
-            self.conversations_panel.conversations_list.Append((item_text,))
-            displayed_chats.append(chat)
-            displayed_names.append(name)
+        lst = self.conversations_panel.conversations_list
+        lst.Freeze()
+        try:
+            lst.DeleteAllItems()
+            for i, chat in enumerate(full_chats):
+                name     = full_names[i]
+                chat_jid = chat.get("remoteJid", "")
+                # ── Conversation filter ───────────────────────────────────────
+                if conv_filter == 'unread' and int(chat.get("unreadCount") or 0) == 0:
+                    continue
+                if conv_filter == 'groups' and not chat_jid.endswith("@g.us"):
+                    continue
+                if conv_filter == 'individual' and chat_jid.endswith("@g.us"):
+                    continue
+                # ── Search filter ─────────────────────────────────────────────
+                if search and search not in name.lower():
+                    continue
+                unread = int(chat.get("unreadCount") or 0)
+                if unread > 0:
+                    unread_str = (
+                        f" {unread} "
+                        + (self.i18n.t("unread_messages") if unread > 1 else self.i18n.t("unread_message"))
+                    )
+                else:
+                    unread_str = ""
+                preview = self._last_msg_preview(chat)
+                item_text = name + unread_str
+                if preview:
+                    item_text += f" {preview}"
+                # Show typing indicator when any participant is composing
+                chat_jid_norm = self._normalize_jid(chat_jid) if chat_jid else ""
+                if chat_jid_norm and getattr(self, "_composing_chats", {}).get(chat_jid_norm):
+                    item_text += f" {self.i18n.t('typing_indicator')}"
+                lst.Append((item_text,))
+                displayed_chats.append(chat)
+                displayed_names.append(name)
+        finally:
+            lst.Thaw()
 
         # Keep backing lists in sync with exactly what is displayed so that
         # on_conversation_selected_by_index(idx) always maps correctly.
@@ -3136,11 +3502,12 @@ class MainWindow(wx.Frame):
         elif panel.conversation is not None:
             # A conversation is already open.  Only re-anchor focus to the
             # message field if the app has completely lost focus (FindFocus()
-            # returns None).  If the user is reading messages or has any other
-            # control focused within the app, leave focus exactly where it is.
+            # returns None) AND WinZapp is the active foreground window.
+            # Skipping the IsActive() guard would cause wx.SetFocus() to run
+            # while the user has another app in front, stealing focus.
             focus_ctrl = getattr(panel, "message_field", None)
             if focus_ctrl and focus_ctrl.IsShownOnScreen():
-                if wx.Window.FindFocus() is None:
+                if wx.Window.FindFocus() is None and self.IsActive():
                     wx.CallAfter(focus_ctrl.SetFocus)
 
         # Also refresh the archived panel if present
@@ -3171,7 +3538,9 @@ class MainWindow(wx.Frame):
             panel.chats_list = arch_displayed_chats
             panel.chat_names = arch_displayed_names
             # Keep focus on archived panel too
-            if arch_displayed_chats and panel.conversation is None:
+            # ArchivedConversationsPanel has no 'conversation' attribute — it never
+            # keeps an "open" conversation, so we simply focus item 0 on first load.
+            if arch_displayed_chats:
                 last_jid   = getattr(panel, "_last_open_jid", "")
                 target_idx = 0
                 if last_jid:
@@ -3246,20 +3615,47 @@ class MainWindow(wx.Frame):
             pass
 
 
+def _write_crash_log(tb: str) -> str:
+    """Write a traceback to crash.log next to the exe and return the path."""
+    from app_paths import _outer_exe_dir
+    crash_path = os.path.join(_outer_exe_dir(), "crash.log")
+    try:
+        with open(crash_path, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(tb)
+    except Exception:
+        pass
+    return crash_path
+
+
 if __name__ == "__main__":
-    from autostart import acquire_single_instance_mutex, activate_existing_window
+    try:
+        from autostart import acquire_single_instance_mutex, activate_existing_window
 
-    background = "--background" in sys.argv
-    first_instance = acquire_single_instance_mutex()
+        background = "--background" in sys.argv
+        first_instance = acquire_single_instance_mutex()
 
-    if not first_instance:
-        if not background:
-            # A normal launch while WinZapp is already running in the background:
-            # bring the existing window to the foreground and exit.
-            activate_existing_window()
-        # If --background and already running: nothing to do — exit silently.
-        sys.exit(0)
+        if not first_instance:
+            if not background:
+                # A normal launch while WinZapp is already running in the background:
+                # bring the existing window to the foreground and exit.
+                activate_existing_window()
+            # If --background and already running: nothing to do — exit silently.
+            sys.exit(0)
 
-    app = wx.App()
-    frame = MainWindow()
-
+        app = wx.App()
+        frame = MainWindow()
+    except Exception:
+        tb = format_exc()
+        crash_path = _write_crash_log(tb)
+        # Try to show a native Windows error box (works even without wx).
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"O WinZapp encontrou um erro crítico ao iniciar e não pôde continuar.\n\n"
+                f"Detalhes foram salvos em:\n{crash_path}\n\n{tb[:800]}",
+                "WinZapp — Erro de inicialização",
+                0x10,  # MB_ICONERROR
+            )
+        except Exception:
+            pass
+        sys.exit(1)

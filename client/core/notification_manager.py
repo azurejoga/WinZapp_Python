@@ -21,6 +21,7 @@ Design decisions:
     toaster is created in one thread and show_toast() called in another.
 """
 
+import os
 import queue
 import sys
 import threading
@@ -208,6 +209,7 @@ def format_notification_title(msg: dict, main_window, i18n) -> str:
         chat = main_window.chats.get(remote_jid, {})
         group_name = (
             main_window._resolve_contact_name(chat)
+            or chat.get("name", "")
             or chat.get("pushName", "")
             or remote_jid.split("@")[0]
         )
@@ -244,6 +246,9 @@ class NotificationManager:
         self.i18n.get_language()
         self._toaster      = None
         self._interactable = False
+        # Register the AUMID on the main thread before starting the worker so
+        # the registry key exists before any WinRT notifier is created.
+        self._register_aumid_registry()
         # Queue consumed by a single long-lived worker thread so that the
         # WinRT/COM toaster object is always created and used in the same
         # thread (avoids [WinError -2147417842] RPC_E_WRONG_THREAD).
@@ -264,6 +269,13 @@ class NotificationManager:
             self._dispatch(title, body, remote_jid)
 
     @staticmethod
+    def _outer_exe_path() -> str:
+        """Return the user-facing exe path (outer exe, not the Nuitka temp extraction)."""
+        if sys.argv and sys.argv[0]:
+            return os.path.abspath(sys.argv[0])
+        return sys.executable
+
+    @staticmethod
     def _register_aumid_registry():
         """Write HKCU\\SOFTWARE\\Classes\\AppUserModelId\\WinZapp to the registry.
 
@@ -272,6 +284,10 @@ class NotificationManager:
         unpackaged app.  Installed builds have this key written by the NSIS
         installer; portable/zip builds have no installer, so we register it here
         at runtime.  Writing the same values twice is harmless.
+
+        We use sys.argv[0] (not sys.executable) for the IconUri because in Nuitka
+        onefile mode sys.executable points to the inner extracted exe in a temp
+        directory, while sys.argv[0] always points to the user-visible outer exe.
         """
         try:
             import winreg
@@ -280,7 +296,9 @@ class NotificationManager:
                                     0, winreg.KEY_WRITE) as key:
                 winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "WinZapp")
                 if _is_frozen():
-                    winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, sys.executable)
+                    exe = sys.argv[0] if sys.argv and sys.argv[0] else sys.executable
+                    winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ,
+                                      os.path.abspath(exe))
         except Exception as e:
             print(f"[NotificationManager] AUMID registry write failed: {e}")
 
@@ -290,11 +308,14 @@ class NotificationManager:
         self._register_aumid_registry()
 
         # Build a prioritised list of AUMID candidates to try.
-        # Installed build: registered AUMID "WinZapp" first, exe path as fallback.
-        # Dev build / portable: exe path (always available, recognised by Windows).
+        # Installed build: registered AUMID "WinZapp" first, outer exe as fallback.
+        # Dev build / portable: outer exe path (always available to Windows).
         # _is_frozen() handles both PyInstaller (sys.frozen) and Nuitka (__compiled__).
+        # Use sys.argv[0] as the exe fallback — in Nuitka onefile sys.executable
+        # points to a temp-dir extraction; sys.argv[0] is the user-visible path.
         if _is_frozen():
-            candidates = [self.APP_ID, sys.executable]
+            outer_exe = self._outer_exe_path()
+            candidates = [self.APP_ID, outer_exe]
         else:
             candidates = [sys.executable]
 
@@ -302,7 +323,10 @@ class NotificationManager:
             # Try interactable first (supports inline reply text box).
             try:
                 from windows_toasts import InteractableWindowsToaster
-                self._toaster      = InteractableWindowsToaster(app_id)
+                # Pass notifierAUMID explicitly — without it the library defaults
+                # to cmd.exe's AUMID, which causes Windows to label the
+                # notification as "Prompt de Comando" / "Command Prompt".
+                self._toaster      = InteractableWindowsToaster(app_id, notifierAUMID=app_id)
                 self._interactable = True
                 print(f"[NotificationManager] interactable toaster ready (app_id={app_id!r})")
                 return
