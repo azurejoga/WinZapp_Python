@@ -135,7 +135,6 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     os.close(bat_fd)
 
     exe_path = os.path.join(install_dir, exe_name)
-    src      = os.path.join(extracted_dir, "*")
 
     bat = (
         "@echo off\n"
@@ -145,8 +144,13 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
         "    timeout /t 1 /nobreak >NUL\n"
         "    goto WAIT\n"
         ")\n"
+        # Give any child processes (Node.js API server) a moment to exit
+        # after the parent process ends, then force-kill stragglers that
+        # would keep _internal DLLs locked.
+        "timeout /t 2 /nobreak >NUL\n"
+        f'taskkill /F /FI "WINDOWTITLE eq WinZapp*" /IM node.exe >NUL 2>&1\n'
         "timeout /t 1 /nobreak >NUL\n"
-        f'xcopy /E /Y /I "{extracted_dir}\\*" "{install_dir}\\"\n'
+        f'xcopy /E /Y /I /H "{extracted_dir}\\*" "{install_dir}\\"\n'
         f'if exist "{exe_path}" start "" "{exe_path}"\n'
         'del "%~f0"\n'
     )
@@ -162,7 +166,7 @@ def _run_batch_installer(extracted_dir: str, install_dir: str, exe_name: str, pi
     else:
         subprocess.Popen(
             ["cmd.exe", "/c", bat_path],
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACH_PROCESS,
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
         )
 
 
@@ -280,6 +284,14 @@ class UpdateProgressDialog(wx.Dialog):
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(extract_dir)
             os.remove(zip_path)
+
+            # If the ZIP placed all files inside a single top-level folder,
+            # point extract_dir at that folder so xcopy copies the contents.
+            _entries = [e for e in os.listdir(extract_dir) if not e.startswith(".")]
+            if len(_entries) == 1 and os.path.isdir(
+                os.path.join(extract_dir, _entries[0])
+            ):
+                extract_dir = os.path.join(extract_dir, _entries[0])
 
             if self._cancelled:
                 return
