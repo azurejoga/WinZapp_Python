@@ -45,6 +45,7 @@
     "wa_disconnected_temp": "La conexión con WhatsApp fue interrumpida. Esperando reconexión automática...",
     "tray_wa_disconnected": "WhatsApp desconectado",
     "media_send_failed": "No se pudo enviar el archivo. Error: {error}",
+    "media_too_large": "El archivo supera el tamaño máximo permitido de {max_mb} MB y no puede enviarse.",
     "no_pairing_code_received": "No se pudo conectar a {app_name}. No se recibió ningún código de emparejamiento.",
     "no_QRcode_received": "No se pudo conectar a {app_name}. No se recibió ningún código QR.",
     "settings_load_failed": "Error al cargar el archivo de configuración:",

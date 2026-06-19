@@ -2091,7 +2091,12 @@ class ConversationsPanel(wx.Panel):
             if not q or q in name.lower()
         ]
 
-        # @all/@todos special entry — shown when query is empty or matches the keyword
+        # Sort: names that start with the query come first, then those that
+        # contain it but don't start with it — both groups sorted alphabetically.
+        if q:
+            matches.sort(key=lambda x: (0 if x[0].lower().startswith(q) else 1, x[0].lower()))
+
+        # @all/@todos special entry — always at the top when query is empty or matches
         all_kw = i18n.t("mention_all_keyword")  # "todos" or "all"
         if not q or q in all_kw or q in "all" or q in "todos":
             matches = [("__ALL__", "@all")] + matches
@@ -2105,7 +2110,6 @@ class ConversationsPanel(wx.Panel):
                 self.main_window.output(i18n.t("mention_no_suggestions"), interrupt=True)
             return
 
-        was_shown = self._mention_panel.IsShown()
         self._mention_list.Clear()
         all_label = i18n.t("mention_all_label")
         for name, jid in matches:
@@ -2119,8 +2123,7 @@ class ConversationsPanel(wx.Panel):
         if self.conversation_panel.IsShown():
             self.conversation_panel.Layout()
         self._mention_list.SetSelection(0)
-        if not was_shown:
-            self.main_window.output(i18n.t("mention_suggestions_available"), interrupt=False)
+        self.main_window.output(i18n.t("mention_suggestions_available"), interrupt=False)
 
     def _on_text_changed_mention_check(self):
         """Called from on_change_message_field to detect and update @mention suggestions."""
@@ -3004,11 +3007,18 @@ class ConversationsPanel(wx.Panel):
                 or []
             )
             for jid in mentioned:
-                phone = jid.split("@")[0]
-                if phone and f"@{phone}" in text:
-                    name = self._get_participant_name(jid)
-                    if name and name != phone:
-                        text = text.replace(f"@{phone}", f"@{name}")
+                mw_ref = self.main_window
+                _lid_map = getattr(mw_ref, "_lid_to_phone", {})
+                if jid.endswith("@lid"):
+                    phone_jid = _lid_map.get(jid, "")
+                    phone = phone_jid.split("@")[0] if phone_jid else ""
+                else:
+                    phone = jid.split("@")[0]
+                if not phone or f"@{phone}" not in text:
+                    continue
+                name = self._get_participant_name(jid)
+                if name and name != phone:
+                    text = text.replace(f"@{phone}", f"@{name}", 1)
             return text
 
         # ── Audio ────────────────────────────────────────────────────────────
@@ -3159,6 +3169,7 @@ class ConversationsPanel(wx.Panel):
                 if lid:
                     candidates.append(lid)
 
+            ppm = getattr(mw, "_presence_pushname_map", {})
             for cjid in candidates:
                 c = mw.contacts.get(cjid)
                 if c:
@@ -3170,6 +3181,11 @@ class ConversationsPanel(wx.Panel):
                     cn = (chat_obj.get("name") or "").strip()
                     if cn and not cn.isdigit() and not is_phone_like(cn):
                         return cn
+            # Fallback: presence-learned pushName map
+            for cjid in candidates:
+                pname = (ppm.get(cjid) or "").strip()
+                if pname and not pname.isdigit() and not is_phone_like(pname):
+                    return pname
             return ""
 
         # Don't use the group JID (@g.us) itself as a sender lookup — when
@@ -3701,6 +3717,7 @@ class ConversationsPanel(wx.Panel):
         """Return a display name for a group participant."""
         mw = self.main_window
         lid_to_phone = getattr(mw, "_lid_to_phone", {})
+        ppm = getattr(mw, "_presence_pushname_map", {})
 
         # Build candidates covering all three JID formats for the same person.
         # Address-book name (contact["name"]) always takes priority over pushName.
@@ -3734,6 +3751,11 @@ class ConversationsPanel(wx.Panel):
             push = msg.get("pushName", "")
             if push and not is_phone_like(push):
                 return push
+        # Fallback: presence-learned pushName map
+        for cjid in candidates:
+            pname = (ppm.get(cjid) or "").strip()
+            if pname and not pname.isdigit() and not is_phone_like(pname):
+                return pname
         if not participant_jid.endswith("@lid"):
             return format_number(participant_jid) or participant_jid
         phone = lid_to_phone.get(participant_jid, "")
@@ -4866,9 +4888,26 @@ class ConversationsPanel(wx.Panel):
         # Capture quoted state before looping (cleared after all enqueued)
         quoted = self._quoted_message
 
+        _MAX_MEDIA_BYTES = 99 * 1024 * 1024
+        i18n = self.main_window.i18n
         for attachment in list(self._staged_attachments):
             path       = attachment["path"]
             media_type = attachment.get("media_type", "document")
+
+            # Pre-check: reject files above the Evolution API 99 MB limit before
+            # creating any UI entry or queuing the send — this prevents silent failures.
+            try:
+                if os.path.getsize(path) > _MAX_MEDIA_BYTES:
+                    wx.MessageBox(
+                        i18n.t("media_too_large").format(max_mb=99),
+                        i18n.t("app_name"),
+                        wx.OK | wx.ICON_ERROR,
+                        self,
+                    )
+                    continue
+            except OSError:
+                pass
+
             vtype      = _VTYPE.get(media_type, "documentMessage")
             local_id   = str(uuid.uuid4())
             virtual_msg = {

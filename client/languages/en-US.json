@@ -45,6 +45,7 @@
     "wa_disconnected_temp": "The WhatsApp connection was interrupted. Waiting for automatic reconnection...",
     "tray_wa_disconnected": "WhatsApp disconnected",
     "media_send_failed": "Could not send the file. Error: {error}",
+    "media_too_large": "The file exceeds the maximum allowed size of {max_mb} MB and cannot be sent.",
     "no_pairing_code_received": "Could not connect to {app_name}. No pairing code was received.",
     "no_QRcode_received": "Could not connect to {app_name}. No QR code was received.",
     "settings_load_failed": "Failed to load the configuration file:",

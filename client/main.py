@@ -1757,6 +1757,21 @@ class MainWindow(wx.Frame):
             self.error_sound.play()
             wx.MessageBox(f"{self.i18n.t('settings_save_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR)
 
+    def _schedule_save_settings(self):
+        """Debounce save_settings: coalesce rapid calls into one write after 2 s.
+
+        Used when background events (e.g. presence.update bursts) update settings
+        frequently — avoids hammering the disk on every event.
+        """
+        with self._save_timer_lock:
+            existing = getattr(self, "_settings_save_timer", None)
+            if existing is not None:
+                existing.cancel()
+            t = threading.Timer(2.0, self.save_settings)
+            t.daemon = True
+            self._settings_save_timer = t
+            t.start()
+
     def load_sounds(self):
         self.startup_sound = Sound(self.sound_system, "startup.ogg")
         self.error_sound = Sound(self.sound_system, "error.ogg")
@@ -2399,6 +2414,13 @@ class MainWindow(wx.Frame):
         # Maps (chat_jid, participant_jid) → wx.CallLater for 10-second auto-clear
         if not hasattr(self, "_presence_timers"):
             self._presence_timers = {}
+        # Persistent pushName map: phone@s.whatsapp.net → real pushName, learned from
+        # presence.update events.  Keyed by phone JID so @lid chats can resolve via
+        # _lid_to_phone lookup.  Loaded from settings and saved whenever updated.
+        if not hasattr(self, "_presence_pushname_map"):
+            self._presence_pushname_map = dict(
+                self.settings.get("presence_pushname_map", {})
+            )
 
     def _find_alt_jid_from_messages(self, chat):
         """
@@ -2431,10 +2453,13 @@ class MainWindow(wx.Frame):
 
         Tries all three JID formats (@s.whatsapp.net, @c.us, @lid) and returns
         the first valid pushName found.  Groups are skipped (always return None).
+        Falls back to the presence-learned pushName map for @lid contacts.
         """
         remoteJid = chat.get("remoteJid", "")
         if not remoteJid or remoteJid.endswith("@g.us"):
             return None
+
+        ppm = getattr(self, "_presence_pushname_map", {})
 
         def _name_from_contact(c) -> str:
             val = (c.get("pushName") or "").strip()
@@ -2446,19 +2471,27 @@ class MainWindow(wx.Frame):
             c = self.contacts.get(jid)
             return _name_from_contact(c) if c else ""
 
+        def _ppm(jid: str) -> str:
+            val = (ppm.get(jid) or "").strip()
+            return val if val and not val.isdigit() and not is_phone_like(val) else ""
+
         local = remoteJid.rsplit("@", 1)[0]
         if remoteJid.endswith("@s.whatsapp.net"):
             return (
                 _try(remoteJid)
                 or _try(local + "@c.us")
                 or _try(getattr(self, "_phone_to_lid", {}).get(remoteJid, ""))
+                or _ppm(remoteJid)
                 or ""
             ) or None
         elif remoteJid.endswith("@c.us"):
+            phone_net = local + "@s.whatsapp.net"
             return (
                 _try(remoteJid)
-                or _try(local + "@s.whatsapp.net")
-                or _try(getattr(self, "_phone_to_lid", {}).get(local + "@s.whatsapp.net", ""))
+                or _try(phone_net)
+                or _try(getattr(self, "_phone_to_lid", {}).get(phone_net, ""))
+                or _ppm(remoteJid)
+                or _ppm(phone_net)
                 or ""
             ) or None
         elif remoteJid.endswith("@lid"):
@@ -2470,6 +2503,8 @@ class MainWindow(wx.Frame):
             return (
                 _try(remoteJid)
                 or (phone and (_try(phone) or _try(phone.rsplit("@", 1)[0] + "@c.us")))
+                or _ppm(remoteJid)
+                or (phone and _ppm(phone))
                 or ""
             ) or None
         return _try(remoteJid) or None
@@ -2923,6 +2958,8 @@ class MainWindow(wx.Frame):
 
     def _resolve_jid_name(self, jid_norm: str) -> str:
         """Return the best display name for a participant JID (contact lookup + fallback)."""
+        ppm = getattr(self, "_presence_pushname_map", {})
+
         # Build candidate list covering all three JID formats for the same person.
         candidates = [jid_norm]
         local = jid_norm.rsplit("@", 1)[0]
@@ -2950,6 +2987,12 @@ class MainWindow(wx.Frame):
                 name = (chat.get("name") or chat.get("pushName") or "").strip()
                 if name and not name.isdigit():
                     return name
+
+        # Fallback: check the presence-learned pushName map
+        for cjid in candidates:
+            pname = (ppm.get(cjid) or "").strip()
+            if pname and not pname.isdigit() and not is_phone_like(pname):
+                return pname
 
         if not jid_norm.endswith(("@g.us", "@lid")):
             return format_number(jid_norm)
@@ -3045,12 +3088,30 @@ class MainWindow(wx.Frame):
 
         presence_changed = False
 
+        _ppm_updated = False
         for participant_jid, data in presences.items():
             if not isinstance(data, dict):
                 continue
             canonical = self._normalize_jid(participant_jid)
             if canonical.endswith("@lid"):
                 canonical = self._lid_to_phone.get(canonical, canonical)
+
+            # ── Persist pushName learned from presence so @lid contacts show
+            # the correct name even before they appear in _lid_to_phone. ──────
+            if canonical.endswith("@s.whatsapp.net"):
+                contact_entry = self.contacts.get(canonical)
+                if contact_entry:
+                    push = (contact_entry.get("pushName") or "").strip()
+                    if push and not push.isdigit() and not is_phone_like(push):
+                        if self._presence_pushname_map.get(canonical) != push:
+                            self._presence_pushname_map[canonical] = push
+                            _ppm_updated = True
+                        # Also index the corresponding @lid if known, so callers
+                        # can look up by lid_jid directly without bridging.
+                        lid = getattr(self, "_phone_to_lid", {}).get(canonical, "")
+                        if lid and self._presence_pushname_map.get(lid) != push:
+                            self._presence_pushname_map[lid] = push
+                            _ppm_updated = True
 
             old_lkp = self._presence_cache.get(canonical, {}).get("lastKnownPresence", "")
             new_lkp = data.get("lastKnownPresence", "unavailable")
@@ -3109,6 +3170,11 @@ class MainWindow(wx.Frame):
                             )
                     except Exception:
                         pass
+
+        # Persist the updated pushName map to settings (debounced via _schedule_save).
+        if _ppm_updated:
+            self.settings["presence_pushname_map"] = dict(self._presence_pushname_map)
+            self._schedule_save_settings()
 
         # Update only the affected row — avoids DeleteAllItems()+Append() rebuild
         # that causes NVDA to re-read the full list and stutter during TTS echo.
@@ -3641,6 +3707,8 @@ class MainWindow(wx.Frame):
         """
         if not jid:
             return ""
+        ppm = getattr(self, "_presence_pushname_map", {})
+        phone_jid = ""
         contact = self.contacts.get(jid)
         if not contact and jid.endswith("@lid"):
             phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
@@ -3650,8 +3718,14 @@ class MainWindow(wx.Frame):
             name = (contact.get("name") or contact.get("pushName") or "").strip()
             if name and not is_phone_like(name):
                 return name
+        # Fallback: presence-learned pushName map
+        for lookup_jid in ([jid, phone_jid] if phone_jid else [jid]):
+            pname = (ppm.get(lookup_jid) or "").strip()
+            if pname and not pname.isdigit() and not is_phone_like(pname):
+                return pname
         if jid.endswith("@lid"):
-            phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
+            if not phone_jid:
+                phone_jid = getattr(self, "_lid_to_phone", {}).get(jid, "")
             return format_number(phone_jid) if phone_jid else ""
         return format_number(jid)
 
