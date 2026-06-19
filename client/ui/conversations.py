@@ -438,6 +438,15 @@ class ConversationsPanel(wx.Panel):
         conv_sizer.Add(self._remove_quote_btn, 0, wx.LEFT | wx.BOTTOM, 5)
         self._remove_quote_btn.Hide()
 
+        # ── Pending mention pills (one label + remove button per @mention) ──
+        self._pending_mentions_panel = wx.Panel(self.conversation_panel)
+        self._pending_mentions_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._pending_mentions_panel.SetSizer(self._pending_mentions_sizer)
+        self._pending_mentions_panel.Hide()
+        conv_sizer.Add(
+            self._pending_mentions_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5
+        )
+
         self.send_message_btn = wx.Button(
             self.conversation_panel, label=i18n.t("send_message")
         )
@@ -716,6 +725,8 @@ class ConversationsPanel(wx.Panel):
         self._pending_mention_display_names.clear()
         self._group_participants_cache = []
         self._hide_mention_suggestions()
+        if hasattr(self, "_pending_mentions_panel"):
+            self._rebuild_mention_pills()
         # Reset search state
         self._search_results    = []
         self._search_result_idx = -1
@@ -1088,6 +1099,7 @@ class ConversationsPanel(wx.Panel):
         self._pending_mentions.clear()
         self._pending_mention_display_names.clear()
         self._hide_mention_suggestions()
+        self._rebuild_mention_pills()
 
         # Clear the text field (this also hides send btn, shows record btn).
         self.message_field.SetValue("")
@@ -2176,6 +2188,67 @@ class ConversationsPanel(wx.Panel):
         self.message_field.SetInsertionPoint(start + len(replacement))
         self._hide_mention_suggestions()
         self._mention_active = False
+        self._rebuild_mention_pills()
+        self.message_field.SetFocus()
+
+    def _rebuild_mention_pills(self):
+        """Rebuild the pending-mention pill buttons panel (one row per @mention)."""
+        i18n = self.main_window.i18n
+        panel = self._pending_mentions_panel
+        sizer = self._pending_mentions_sizer
+
+        # Destroy existing pill widgets.
+        for child in list(panel.GetChildren()):
+            child.Destroy()
+        sizer.Clear(delete_windows=False)
+
+        if not self._pending_mentions:
+            panel.Hide()
+            if self.conversation_panel.IsShown():
+                self.conversation_panel.Layout()
+            return
+
+        for jid in list(self._pending_mentions):
+            display = self._pending_mention_display_names.get(jid) or jid.rsplit("@", 1)[0]
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            lbl = wx.StaticText(panel, label=f"@{display}")
+            btn_label = i18n.t("remove_mention").format(name=display)
+            btn = wx.Button(panel, label=btn_label)
+            # Capture jid/display in closure.
+            def _make_handler(j, d):
+                def _handler(evt):
+                    self._on_remove_mention(j, d)
+                return _handler
+            btn.Bind(wx.EVT_BUTTON, _make_handler(jid, display))
+            row.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+            row.Add(btn, 0, wx.ALIGN_CENTER_VERTICAL)
+            sizer.Add(row, 0, wx.LEFT | wx.BOTTOM, 3)
+
+        panel.Show()
+        panel.Layout()
+        if self.conversation_panel.IsShown():
+            self.conversation_panel.Layout()
+
+    def _on_remove_mention(self, jid: str, display: str):
+        """Remove a pending @mention pill and its text from the message field."""
+        # Remove @display from message text if present.
+        text = self.message_field.GetValue()
+        # Try removing "@display " (with trailing space) first, then "@display" alone.
+        if f"@{display} " in text:
+            new_text = text.replace(f"@{display} ", "", 1)
+        elif f"@{display}" in text:
+            new_text = text.replace(f"@{display}", "", 1)
+        else:
+            new_text = text
+        if new_text != text:
+            self.message_field.ChangeValue(new_text)
+
+        # Remove from pending state.
+        if jid in self._pending_mentions:
+            self._pending_mentions.remove(jid)
+        self._pending_mention_display_names.pop(jid, None)
+
+        self._rebuild_mention_pills()
         self.message_field.SetFocus()
 
     def _fetch_group_participants(self, jid: str):
@@ -3011,13 +3084,19 @@ class ConversationsPanel(wx.Panel):
                 _lid_map = getattr(mw_ref, "_lid_to_phone", {})
                 if jid.endswith("@lid"):
                     phone_jid = _lid_map.get(jid, "")
-                    phone = phone_jid.split("@")[0] if phone_jid else ""
+                    if phone_jid:
+                        phone = phone_jid.split("@")[0]
+                    else:
+                        # No mapping: use the local part of the @lid JID — this is
+                        # what the send path writes into the message text as @{local}.
+                        phone = jid.rsplit("@", 1)[0]
                 else:
                     phone = jid.split("@")[0]
                 if not phone or f"@{phone}" not in text:
                     continue
                 name = self._get_participant_name(jid)
-                if name and name != phone:
+                jid_local = jid.rsplit("@", 1)[0]
+                if name and name != phone and name != jid_local and name != jid:
                     text = text.replace(f"@{phone}", f"@{name}", 1)
             return text
 
@@ -3761,7 +3840,9 @@ class ConversationsPanel(wx.Panel):
         phone = lid_to_phone.get(participant_jid, "")
         if phone:
             return format_number(phone)
-        return participant_jid
+        # No phone mapping for this @lid — return just the local part (strip "@lid")
+        # so the display shows the raw identifier without the domain suffix.
+        return participant_jid.rsplit("@", 1)[0]
 
     def _on_menu_reply_private(self, msg: dict, participant_jid: str):
         """Open a private conversation with the group participant and cite their message."""
