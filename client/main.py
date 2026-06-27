@@ -2816,207 +2816,206 @@ class MainWindow(wx.Frame):
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        try:
-            response = requests.post(url, json={}, headers=headers, timeout=30)
-            if response.status_code not in (200, 201):
-                logging.error(f"[get_remote_chats] API error {response.status_code}: {response.text[:200]}")
-                return chats
+
+        # Retry up to 3 times with increasing timeouts for transient server load
+        last_error = None
+        for attempt in range(3):
             try:
-                body = response.json()
-            except Exception as json_err:
-                logging.error(f"[get_remote_chats] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
-                return chats
-            # list-chats returns the array directly; tolerate the legacy
-            # {"response": [...]} envelope too in case of a mixed deployment.
-            if isinstance(body, list):
-                response_data = body
-            elif isinstance(body, dict):
-                response_data = body.get("response", [])
-            else:
-                response_data = []
-            if not isinstance(response_data, list):
-                response_data = []
-
-            # Traduzir as chaves do WPPConnect (remoteJid)
-            for chat in response_data:
-                if not isinstance(chat, dict):
-                    continue
-                wpp_id = chat.get("id")
-                jid_str = wpp_id.get("_serialized") if isinstance(wpp_id, dict) else wpp_id
-                if jid_str:
-                    chat["remoteJid"] = jid_str.replace("@c.us", "@s.whatsapp.net")
-            # Diagnostic log to inspect chat keys
-            lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
-            if lid_chats:
-                logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
-                logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
-
-            deleted = set(self.settings.get("deleted_chats", []))
-            cleared = self.settings.get("cleared_chats", {})
-
-            for chat in response_data:
-                if not isinstance(chat, dict):
-                    continue
-                jid = self._normalize_jid(chat.get("remoteJid", ""))
-                
-                # Try to extract JID mapping from lastMessage if present
-                last_msg = chat.get("lastMessage")
-                if isinstance(last_msg, dict):
-                    key = last_msg.get("key")
-                    if isinstance(key, dict):
-                        remote = key.get("remoteJid", "")
-                        alt = key.get("remoteJidAlt", "")
-                        if remote and alt:
-                            if remote.endswith("@lid") and alt.endswith("@s.whatsapp.net"):
-                                if not hasattr(self, "_lid_to_phone"):
-                                    self._lid_to_phone = {}
-                                if not hasattr(self, "_phone_to_lid"):
-                                    self._phone_to_lid = {}
-                                if self._lid_to_phone.get(remote) != alt:
-                                    self._lid_to_phone[remote] = alt
-                                    self._phone_to_lid[alt] = remote
-                                    logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats: {remote} <-> {alt}")
-                            elif alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
-                                if not hasattr(self, "_lid_to_phone"):
-                                    self._lid_to_phone = {}
-                                if not hasattr(self, "_phone_to_lid"):
-                                    self._phone_to_lid = {}
-                                if self._lid_to_phone.get(alt) != remote:
-                                    self._lid_to_phone[alt] = remote
-                                    self._phone_to_lid[remote] = alt
-                                    logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats (alt): {alt} <-> {remote}")
-
-                # Skip status@broadcast — statuses are shown in the Status tab
-                if not jid or jid.endswith("@broadcast"):
-                    continue
-                # Populate/update self.contacts from chat name metadata
-                if jid and not jid.endswith("@g.us"):
-                    name = chat.get("name")
-                    pushName = chat.get("pushName")
-                    # Reject base64 thumbnail/binary blobs that some business
-                    # accounts leak into name fields (e.g. "/9j/4AAQSkZJRg...").
-                    if looks_like_binary_blob(name):
-                        name = None
-                    if looks_like_binary_blob(pushName):
-                        pushName = None
-                    if jid not in self.contacts:
-                        self.contacts[jid] = {"id": jid, "remoteJid": jid}
-                    if name:
-                        self.contacts[jid]["name"] = name
-                    if pushName:
-                        self.contacts[jid]["pushName"] = pushName
-                    
-                    phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
-                    if phone_jid:
-                        if phone_jid not in self.contacts:
-                            self.contacts[phone_jid] = {"id": phone_jid, "remoteJid": phone_jid}
-                        if name:
-                            self.contacts[phone_jid]["name"] = name
-                        if pushName:
-                            self.contacts[phone_jid]["pushName"] = pushName
-                            
-                    lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
-                    if lid_jid:
-                        if lid_jid not in self.contacts:
-                            self.contacts[lid_jid] = {"id": lid_jid, "remoteJid": lid_jid}
-                        if name:
-                            self.contacts[lid_jid]["name"] = name
-                        if pushName:
-                            self.contacts[lid_jid]["pushName"] = pushName
-
-                # If this is a @lid JID and we already have the canonical
-                # @s.whatsapp.net entry (from the _lid_to_phone cache built at
-                # startup), skip the @lid entirely — it's a duplicate.
-                if jid.endswith("@lid"):
-                    phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
-                    if phone_jid and phone_jid in chats:
+                timeout = 30 * (attempt + 1)
+                response = requests.post(url, json={}, headers=headers, timeout=timeout)
+                if response.status_code not in (200, 201):
+                    logging.error(f"[get_remote_chats] API error {response.status_code}: {response.text[:200]}")
+                    if attempt < 2:
+                        logging.info(f"[get_remote_chats] Retrying ({attempt + 1}/3)...")
                         continue
-                # Never re-add a chat the user explicitly deleted.
-                # Check both the jid itself and its LID/phone alias.
-                if jid in deleted:
-                    continue
-                if jid.endswith("@lid"):
-                    phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
-                    if phone_jid and phone_jid in deleted:
+                    return chats
+                try:
+                    body = response.json()
+                except Exception as json_err:
+                    logging.error(f"[get_remote_chats] Failed to parse JSON response: {json_err}. Response body: {response.text[:200]}")
+                    if attempt < 2:
+                        logging.info(f"[get_remote_chats] Retrying ({attempt + 1}/3)...")
                         continue
-                if not jid.endswith("@lid"):
-                    lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
-                    if lid_jid and lid_jid in deleted:
-                        continue
-                # Also skip chats the user explicitly cleared (messages deleted).
-                # The server re-adding them with empty records is just noise.
-                if jid in cleared:
-                    continue
-                if jid not in chats:
-                    if "messages" not in chat:
-                        chat["messages"] = {"messages": {"records": []}}
-                    chat["remoteJid"] = jid
-                    # For groups, prefer `subject` field if `name` is empty
-                    if jid.endswith("@g.us"):
-                        name = chat.get("name") or chat.get("subject") or ""
-                        if not name or name.strip() == "":
-                            name = getattr(self, "_group_name_cache", {}).get(jid, "")
-                            if not name or name.strip() == "":
-                                name = self._fill_group_name(jid)
-                        chat["name"] = name
-                    chats[jid] = chat
+                    return chats
+
+                # list-chats returns the array directly; tolerate the legacy
+                # {"response": [...]} envelope too in case of a mixed deployment.
+                if isinstance(body, list):
+                    response_data = body
+                elif isinstance(body, dict):
+                    response_data = body.get("response", [])
                 else:
-                    # Chat already in local cache: refresh metadata from the
-                    # server without overwriting local messages or the normalised
-                    # remoteJid.
-                    for k, v in chat.items():
-                        if k in ("messages", "remoteJid"):
-                            continue
-                        # Never copy pushName from API for groups — it contains
-                        # the last message sender's name, not the group subject.
-                        if k == "pushName" and jid.endswith("@g.us"):
-                            continue
-                        # For existing groups, use `subject` as `name` fallback
-                        if k == "name" and jid.endswith("@g.us") and not v:
-                            v = chat.get("subject", "")
-                        # Don't let a stale server unreadCount re-mark a
-                        # conversation the user already read locally.
-                        # mark_conversation_as_read() sets it to 0 in-memory
-                        # and notifies the server, but the server may not have
-                        # propagated the change yet when this sync runs.
-                        if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
-                            continue
-                        chats[jid][k] = v
-            # Sync mute and pin state from server into local settings (server is
-            # the source of truth). Only update a mute when muteExpiration is
-            # explicitly present in the chat dict — absence means "no info yet"
-            # and should not wipe the locally-known mute state.
-            muted_chats = self.settings.setdefault("muted_chats", {})
-            pinned_chats = self.settings.setdefault("pinned_chats", [])
-            now = int(time.time())
-            for chat in response_data:
-                if not isinstance(chat, dict):
-                    continue
-                raw_jid = chat.get("remoteJid", "")
-                if not raw_jid:
-                    continue
-                jid = self._normalize_jid(raw_jid)
-                if "muteExpiration" in chat:
-                    mute_expiry = chat["muteExpiration"]
-                    if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
-                        muted_chats[jid] = int(mute_expiry)
-                    elif jid in muted_chats:
-                        del muted_chats[jid]
+                    response_data = []
+                if not isinstance(response_data, list):
+                    response_data = []
 
-                # `pin` is a truthy timestamp when the chat is pinned, 0/absent
-                # otherwise. Mirror it into pinned_chats.
-                is_pinned = bool(chat.get("pin")) or chat.get("pinned") is True
-                if is_pinned:
-                    if jid not in pinned_chats:
-                        pinned_chats.append(jid)
-                elif jid in pinned_chats:
-                    pinned_chats.remove(jid)
+                # Traduzir as chaves do WPPConnect (remoteJid)
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    wpp_id = chat.get("id")
+                    jid_str = wpp_id.get("_serialized") if isinstance(wpp_id, dict) else wpp_id
+                    if jid_str:
+                        chat["remoteJid"] = jid_str.replace("@c.us", "@s.whatsapp.net")
 
-            self.save_data(chats, self.contacts)
-            return chats
-        except Exception as e:
+                # Diagnostic log to inspect chat keys
+                lid_chats = [c for c in response_data if isinstance(c, dict) and c.get("remoteJid", "").endswith("@lid")]
+                if lid_chats:
+                    logging.info(f"[get_remote_chats] RAW LID CHAT KEYS: {list(lid_chats[0].keys())}")
+                    logging.info(f"[get_remote_chats] RAW LID CHAT DATA: {lid_chats[0]}")
+
+                deleted = set(self.settings.get("deleted_chats", []))
+                cleared = self.settings.get("cleared_chats", {})
+
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    jid = self._normalize_jid(chat.get("remoteJid", ""))
+
+                    # Try to extract JID mapping from lastMessage if present
+                    last_msg = chat.get("lastMessage")
+                    if isinstance(last_msg, dict):
+                        key = last_msg.get("key")
+                        if isinstance(key, dict):
+                            remote = key.get("remoteJid", "")
+                            alt = key.get("remoteJidAlt", "")
+                            if remote and alt:
+                                if remote.endswith("@lid") and alt.endswith("@s.whatsapp.net"):
+                                    if not hasattr(self, "_lid_to_phone"):
+                                        self._lid_to_phone = {}
+                                    if not hasattr(self, "_phone_to_lid"):
+                                        self._phone_to_lid = {}
+                                    if self._lid_to_phone.get(remote) != alt:
+                                        self._lid_to_phone[remote] = alt
+                                        self._phone_to_lid[alt] = remote
+                                        logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats: {remote} <-> {alt}")
+                                elif alt.endswith("@lid") and remote.endswith("@s.whatsapp.net"):
+                                    if not hasattr(self, "_lid_to_phone"):
+                                        self._lid_to_phone = {}
+                                    if not hasattr(self, "_phone_to_lid"):
+                                        self._phone_to_lid = {}
+                                    if self._lid_to_phone.get(alt) != remote:
+                                        self._lid_to_phone[alt] = remote
+                                        self._phone_to_lid[remote] = alt
+                                        logging.info(f"[LID Mapping] Extracted mapping from lastMessage in get_remote_chats (alt): {alt} <-> {remote}")
+
+                    # Skip status@broadcast — statuses are shown in the Status tab
+                    if not jid or jid.endswith("@broadcast"):
+                        continue
+                    # Populate/update self.contacts from chat name metadata
+                    if jid and not jid.endswith("@g.us"):
+                        name = chat.get("name")
+                        pushName = chat.get("pushName")
+                        if looks_like_binary_blob(name):
+                            name = None
+                        if looks_like_binary_blob(pushName):
+                            pushName = None
+                        if jid not in self.contacts:
+                            self.contacts[jid] = {"id": jid, "remoteJid": jid}
+                        if name:
+                            self.contacts[jid]["name"] = name
+                        if pushName:
+                            self.contacts[jid]["pushName"] = pushName
+
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+                        if phone_jid:
+                            if phone_jid not in self.contacts:
+                                self.contacts[phone_jid] = {"id": phone_jid, "remoteJid": phone_jid}
+                            if name:
+                                self.contacts[phone_jid]["name"] = name
+                            if pushName:
+                                self.contacts[phone_jid]["pushName"] = pushName
+
+                        lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
+                        if lid_jid:
+                            if lid_jid not in self.contacts:
+                                self.contacts[lid_jid] = {"id": lid_jid, "remoteJid": lid_jid}
+                            if name:
+                                self.contacts[lid_jid]["name"] = name
+                            if pushName:
+                                self.contacts[lid_jid]["pushName"] = pushName
+
+                    if jid.endswith("@lid"):
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+                        if phone_jid and phone_jid in chats:
+                            continue
+                    if jid in deleted:
+                        continue
+                    if jid.endswith("@lid"):
+                        phone_jid = getattr(self, "_lid_to_phone", {}).get(jid)
+                        if phone_jid and phone_jid in deleted:
+                            continue
+                    if not jid.endswith("@lid"):
+                        lid_jid = getattr(self, "_phone_to_lid", {}).get(jid)
+                        if lid_jid and lid_jid in deleted:
+                            continue
+                    if jid in cleared:
+                        continue
+                    if jid not in chats:
+                        if "messages" not in chat:
+                            chat["messages"] = {"messages": {"records": []}}
+                        chat["remoteJid"] = jid
+                        if jid.endswith("@g.us"):
+                            name = chat.get("name") or chat.get("subject") or ""
+                            if not name or name.strip() == "":
+                                name = getattr(self, "_group_name_cache", {}).get(jid, "")
+                                if not name or name.strip() == "":
+                                    name = self._fill_group_name(jid)
+                            chat["name"] = name
+                        chats[jid] = chat
+                    else:
+                        for k, v in chat.items():
+                            if k in ("messages", "remoteJid"):
+                                continue
+                            if k == "pushName" and jid.endswith("@g.us"):
+                                continue
+                            if k == "name" and jid.endswith("@g.us") and not v:
+                                v = chat.get("subject", "")
+                            if k == "unreadCount" and int(chats[jid].get("unreadCount") or 0) == 0:
+                                continue
+                            chats[jid][k] = v
+
+                # Sync mute and pin state from server into local settings
+                muted_chats = self.settings.setdefault("muted_chats", {})
+                pinned_chats = self.settings.setdefault("pinned_chats", [])
+                now = int(time.time())
+                for chat in response_data:
+                    if not isinstance(chat, dict):
+                        continue
+                    raw_jid = chat.get("remoteJid", "")
+                    if not raw_jid:
+                        continue
+                    jid = self._normalize_jid(raw_jid)
+                    if "muteExpiration" in chat:
+                        mute_expiry = chat["muteExpiration"]
+                        if mute_expiry == -1 or (isinstance(mute_expiry, (int, float)) and mute_expiry > now):
+                            muted_chats[jid] = int(mute_expiry)
+                        elif jid in muted_chats:
+                            del muted_chats[jid]
+                    is_pinned = bool(chat.get("pin")) or chat.get("pinned") is True
+                    if is_pinned:
+                        if jid not in pinned_chats:
+                            pinned_chats.append(jid)
+                    elif jid in pinned_chats:
+                        pinned_chats.remove(jid)
+
+                self.save_data(chats, self.contacts)
+                return chats
+            except Exception as e:
+                last_error = e
+                logging.warning(f"[get_remote_chats] Attempt {attempt + 1}/3 failed: {e}")
+                if attempt < 2:
+                    continue
+            else:
+                break
+
+        if last_error:
             self.error_sound.play()
-            wx.MessageBox(f"{self.i18n.t('chat_retrieval_failed')} {format_exc()}", self.i18n.t("error").format(app_name=self.app_name), wx.OK | wx.ICON_ERROR, self)
+            wx.MessageBox(
+                f"{self.i18n.t('chat_retrieval_failed')} {last_error}",
+                self.i18n.t("error").format(app_name=self.app_name),
+                wx.OK | wx.ICON_ERROR, self
+            )
 
     def normalize_chats(self, chats):
         settings_changed = False
